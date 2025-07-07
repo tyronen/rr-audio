@@ -3,7 +3,7 @@
 
 # ensure we have git, clone repo, cd in etc.
 apt-get update
-apt-get install -y vim rsync git nvtop htop tmux curl ca-certificates git-lfs lsof nano
+apt-get install -y vim rsync git nvtop htop tmux curl ca-certificates git-lfs lsof nano less
 
 # start ssh agent, add key, go to /workspace
 eval "$(ssh-agent -s)"

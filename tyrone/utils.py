@@ -2,7 +2,7 @@ import logging
 from contextlib import nullcontext
 
 import torch
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 
 
 START_TOKEN = 10  # After digits 0-9
@@ -31,7 +31,7 @@ def get_device():
 
 def amp_components(device, train=False):
     if device.type == "cuda" and train:
-        return autocast(), GradScaler()
+        return autocast(device_type="cuda"), GradScaler()
     else:
         # fall-back: no automatic casting, dummy scaler
         return nullcontext(), GradScaler(enabled=False)

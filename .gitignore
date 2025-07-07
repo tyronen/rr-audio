@@ -2,7 +2,7 @@ data/
 wandb/
 .idea/
 node_modules/
-
+constraints.txt
 *.orig
 *.rej
 

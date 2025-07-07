@@ -17,7 +17,7 @@ fi
 echo "🔍 Detecting system package versions..."
 
 # Define the path to the system's Python executable
-PY_SYSTEM="/usr/bin/python3.10"
+PY_SYSTEM="/usr/bin/python3.11"
 
 # Execute Python commands to get the exact version strings
 TORCH_VERSION=$($PY_SYSTEM -c "import torch; print(torch.__version__)")

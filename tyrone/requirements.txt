@@ -1,0 +1,10 @@
+black
+datasets
+hf-transfer
+librosa
+matplotlib
+notebook
+soundfile
+tqdm
+transformers
+wandb

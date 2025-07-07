@@ -2,25 +2,24 @@ import argparse
 import logging
 import subprocess
 from typing import Optional, Tuple, List
-from datasets import load_dataset, Dataset
 
 import torch
+from datasets import load_dataset, Dataset
 from torch import optim, nn
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, Subset
-import wandb
 from tqdm import tqdm
 
 import models
 import utils
+import wandb
+from audio_data import UrbanSoundDataset
 
-# config given here represents approximate best run, according to sweep experiments (should achieve 99% test acc)
-# NB. a similar 99% result was achieved with 32 epochs on: ffn_dims=1024, num_heads=32, patch_size=7, weight_decay=1e-2 (see sweeps/9wmxmvo1.csv)
 hyperparameters = {
-    "batch_size": 2048,
+    "batch_size": 384,
     "learning_rate": 5e-4,
-    "epochs": 95,
-    "patience": -1,
+    "epochs": 25,
+    "patience": 3,
     "model_dim": 256,
     "ffn_dim": 2048,
     "num_encoders": 5,
@@ -54,19 +53,23 @@ parser.add_argument("--sweep", help="Run hyperparameter sweep", action="store_tr
 parser.add_argument("--check", help="Make sure it works", action="store_true")
 args = parser.parse_args()
 
+
 def get_git_commit():
     return subprocess.check_output(["git", "rev-parse", "HEAD"]).decode("ascii").strip()
+
 
 def setup_data() -> Tuple[Dataset, List[List[int]]]:
     """Setup and return the full dataset and fold indices."""
     raw_data = load_dataset("danavery/urbansound8K")
-    full_dataset = raw_data['train']  # Assuming all data is in 'train' split
+    hf_dataset = raw_data['train']  # Assuming all data is in 'train' split
 
     # Group indices by fold
     fold_indices = [[] for _ in range(10)]
-    for idx, sample in enumerate(full_dataset):
+    for idx, sample in enumerate(hf_dataset):
         fold_num = sample['fold'] - 1  # Convert 1-10 to 0-9
         fold_indices[fold_num].append(idx)
+
+    full_dataset = UrbanSoundDataset(hf_dataset)
 
     return full_dataset, fold_indices
 
@@ -100,7 +103,7 @@ def get_fold_dataloaders(
     # Create dataloaders
     device = utils.get_device()
     pin_memory = device.type == "cuda"
-    num_workers = 8 if device.type == "cuda" else 0
+    num_workers = 0  # Disable multiprocessing for debugging
 
     train_dl = DataLoader(
         train_subset,
@@ -126,14 +129,15 @@ def get_fold_dataloaders(
 
     return train_dl, val_dl, test_dl
 
+
 def run_batch(
-    dataloader,
-    model,
-    device,
-    loss_fn: nn.Module,
-    train: bool = False,
-    optimizer: Optional[Optimizer] = None,
-    desc: str = "",
+        dataloader,
+        model,
+        device,
+        loss_fn: nn.Module,
+        train: bool = False,
+        optimizer: Optional[Optimizer] = None,
+        desc: str = "",
 ):
     """
     Runs one pass over `dataloader`.
@@ -177,13 +181,13 @@ def run_batch(
 
 
 def run_training(
-    model: nn.Module,
-    train_dl: DataLoader,
-    val_dl: DataLoader,
-    device: torch.device,
-    loss_fn: nn.Module,
-    optimizer: Optimizer,
-    config: dict,
+        model: nn.Module,
+        train_dl: DataLoader,
+        val_dl: DataLoader,
+        device: torch.device,
+        loss_fn: nn.Module,
+        optimizer: Optimizer,
+        config: dict,
 ) -> nn.Module:
     best_loss = float("inf")
     epochs_since_best = 0
@@ -216,19 +220,20 @@ def run_training(
         if val_loss < best_loss:
             best_loss = val_loss
             epochs_since_best = 0
-            if not args.no_save:
+            if not args.check:
                 model_dict = {
-                    "model_state_dict": model.state_dict(),
                     "config": dict(config),  # Ensure config is a plain dict
-                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
                     "best_loss": best_loss,
                 }
                 torch.save(model_dict, models.CNN_MODEL_PATH)
         else:
             epochs_since_best += 1
+        if args.check:
+            break
         if config["patience"] == -1:
             continue  # add option to disable early stop
-        elif epochs_since_best >= config["patience"] or args.check:
+        elif epochs_since_best >= config["patience"]:
             break
 
     return model
@@ -277,13 +282,11 @@ def run_single_fold(
     )
 
     # Load best checkpoint if available
-    if not args.no_save:
+    if not args.check:
         try:
             fold_model_path = f"{models.CNN_MODEL_PATH}_fold_{test_fold + 1}.pth"
             checkpoint = torch.load(fold_model_path, weights_only=True, map_location=device)
             model.load_state_dict(checkpoint["model_state_dict"])
-        except FileNotFoundError:
-            logging.warning(f"Checkpoint for fold {test_fold + 1} not found, using current model state")
         except Exception as e:
             logging.warning(f"Failed to load checkpoint for fold {test_fold + 1}: {e}")
 
@@ -390,6 +393,7 @@ def main():
         config = dict(hyperparameters)  # makes a shallow copy
         config["git_commit"] = get_git_commit()
         run_single_training(config)
+
 
 if __name__ == "__main__":
     main()
