@@ -1,18 +1,17 @@
 import argparse
 import logging
-from typing import Optional
+import subprocess
+from typing import Optional, Tuple, List
+from datasets import load_dataset, Dataset
 
 import torch
 from torch import optim, nn
 from torch.optim import Optimizer
-from torch.utils.data import DataLoader
-from torch.utils.data import random_split
-from torchvision import datasets
-from torchvision.transforms import v2
+from torch.utils.data import DataLoader, Subset
 import wandb
 from tqdm import tqdm
 
-from models import VitTransformer
+import models
 import utils
 
 # config given here represents approximate best run, according to sweep experiments (should achieve 99% test acc)
@@ -22,7 +21,6 @@ hyperparameters = {
     "learning_rate": 5e-4,
     "epochs": 95,
     "patience": -1,
-    "patch_size": 4,  # base MNIST images are 28x28, patch size must divide that
     "model_dim": 256,
     "ffn_dim": 2048,
     "num_encoders": 5,
@@ -40,7 +38,6 @@ sweep_config = {
         "learning_rate": {"values": [5e-4]},
         "epochs": {"values": [95, 196]},
         "patience": {"values": [-1]},
-        "patch_size": {"values": [2]},
         "model_dim": {"values": [256]},
         "ffn_dim": {"values": [2048]},
         "num_encoders": {"values": [5]},
@@ -52,21 +49,88 @@ sweep_config = {
 
 parser = argparse.ArgumentParser(description="Train simple model")
 parser.add_argument("--entity", help="W and B entity", default="mlx-institute")
-parser.add_argument("--project", help="W and B project", default="encoder-only")
+parser.add_argument("--project", help="W and B project", default="cnn-classifier")
 parser.add_argument("--sweep", help="Run hyperparameter sweep", action="store_true")
-parser.add_argument(
-    "--no-save",
-    help="Don't save model state (or checkpoints)",
-    action="store_true",
-)
+parser.add_argument("--check", help="Make sure it works", action="store_true")
 args = parser.parse_args()
 
+def get_git_commit():
+    return subprocess.check_output(["git", "rev-parse", "HEAD"]).decode("ascii").strip()
+
+def setup_data() -> Tuple[Dataset, List[List[int]]]:
+    """Setup and return the full dataset and fold indices."""
+    raw_data = load_dataset("danavery/urbansound8K")
+    full_dataset = raw_data['train']  # Assuming all data is in 'train' split
+
+    # Group indices by fold
+    fold_indices = [[] for _ in range(10)]
+    for idx, sample in enumerate(full_dataset):
+        fold_num = sample['fold'] - 1  # Convert 1-10 to 0-9
+        fold_indices[fold_num].append(idx)
+
+    return full_dataset, fold_indices
+
+
+def get_fold_dataloaders(
+        dataset: Dataset,
+        fold_indices: List[List[int]],
+        test_fold: int,
+        val_fold: int,
+        config: dict
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """Create train/val/test dataloaders for a specific fold configuration."""
+
+    # Test fold
+    test_indices = fold_indices[test_fold]
+
+    # Validation fold
+    val_indices = fold_indices[val_fold]
+
+    # Training folds (all others)
+    train_indices = []
+    for i in range(10):
+        if i != test_fold and i != val_fold:
+            train_indices.extend(fold_indices[i])
+
+    # Create subsets
+    train_subset = Subset(dataset, train_indices)
+    val_subset = Subset(dataset, val_indices)
+    test_subset = Subset(dataset, test_indices)
+
+    # Create dataloaders
+    device = utils.get_device()
+    pin_memory = device.type == "cuda"
+    num_workers = 8 if device.type == "cuda" else 0
+
+    train_dl = DataLoader(
+        train_subset,
+        batch_size=config["batch_size"],
+        shuffle=True,
+        pin_memory=pin_memory,
+        num_workers=num_workers,
+    )
+    val_dl = DataLoader(
+        val_subset,
+        batch_size=config["batch_size"],
+        shuffle=False,
+        pin_memory=pin_memory,
+        num_workers=num_workers,
+    )
+    test_dl = DataLoader(
+        test_subset,
+        batch_size=config["batch_size"],
+        shuffle=False,
+        pin_memory=pin_memory,
+        num_workers=num_workers,
+    )
+
+    return train_dl, val_dl, test_dl
 
 def run_batch(
     dataloader,
     model,
     device,
-    loss_fn: nn.Module = nn.CrossEntropyLoss(),
+    loss_fn: nn.Module,
     train: bool = False,
     optimizer: Optional[Optimizer] = None,
     desc: str = "",
@@ -110,156 +174,6 @@ def run_batch(
     avg_loss = total_loss / num_batches
     accuracy = 100 * correct / size
     return accuracy, avg_loss
-
-
-def setup_data():
-    """Setup and return datasets and dataloaders."""
-    # TODO: add some augmentation here to improve model robustness (e.g. random rotation/affine/perspective)
-    train_transform = v2.Compose(
-        [
-            v2.ToImage(),
-            v2.ToDtype(torch.float32, scale=True),
-            # 'augment' training data by randomly applying wonkiness
-            v2.RandomAffine(degrees=10, translate=(0.1, 0.1)),  # type: ignore
-        ]
-    )
-    test_transform = v2.Compose([v2.ToImage(), v2.ToDtype(torch.float32, scale=True)])
-
-    raw_data = datasets.MNIST(root="data", train=True, download=True, transform=train_transform)
-    stats_dataloader = DataLoader(raw_data, batch_size=len(raw_data.data), shuffle=False)
-    images, _ = next(iter(stats_dataloader))
-
-    train_size = int(0.9 * len(raw_data))
-    val_size = len(raw_data) - train_size
-    generator = torch.Generator().manual_seed(hyperparameters["seed"])
-    training_data, val_data = random_split(raw_data, [train_size, val_size], generator)
-    test_data = datasets.MNIST(root="data", train=False, download=True, transform=test_transform)
-
-    return training_data, val_data, test_data
-
-
-def run_single_training(config=None):
-    """Run a single training session with given config."""
-    if config is None:
-        config = hyperparameters
-
-    if config["model_dim"] % config["num_heads"] != 0:
-        logging.error(
-            f"model_dim must be a multiple of num_heads, {config['model_dim']}, {config['num_heads']} not permitted"
-        )
-        return None
-
-    device = utils.get_device()
-
-    # Setup data
-    training_data, val_data, test_data = setup_data()
-
-    pin_memory = device.type == "cuda"
-    num_workers = 8 if device.type == "cuda" else 0
-    train_dataloader = DataLoader(
-        training_data,
-        batch_size=config["batch_size"],
-        shuffle=True,
-        pin_memory=pin_memory,
-        num_workers=num_workers,
-    )
-    val_dataloader = DataLoader(
-        val_data,
-        batch_size=config["batch_size"],
-        shuffle=False,
-        pin_memory=pin_memory,
-        num_workers=num_workers,
-    )
-    test_dataloader = DataLoader(
-        test_data,
-        batch_size=config["batch_size"],
-        shuffle=False,
-        pin_memory=pin_memory,
-        num_workers=num_workers,
-    )
-
-    model = VitTransformer(
-        patch_size=config["patch_size"],
-        model_dim=config["model_dim"],
-        ffn_dim=config["ffn_dim"],
-        num_encoders=config["num_encoders"],
-        num_heads=config["num_heads"],
-        dropout=config["dropout"],
-    )
-    model.to(device)
-
-    loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
-    optimizer = optim.AdamW(
-        model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"]
-    )
-
-    wandb.watch(model, log="all", log_freq=100)
-    wandb.define_metric("val_accuracy", summary="max")
-    wandb.define_metric("val_loss", summary="min")
-
-    logging.info("Starting training...")
-    model = run_training(
-        model=model,
-        train_dl=train_dataloader,
-        val_dl=val_dataloader,
-        device=device,
-        loss_fn=loss_fn,
-        optimizer=optimizer,
-        config=config,
-    )
-
-    # if we stopped early and have a checkpoint, load it
-    if not args.no_save:
-        try:
-            checkpoint = torch.load(utils.SIMPLE_MODEL_FILE, weights_only=True, map_location=device)
-            model.load_state_dict(checkpoint["model_state_dict"])
-        except FileNotFoundError:
-            logging.warning(
-                f"Checkpoint file {utils.SIMPLE_MODEL_FILE} not found, using current model state"
-            )
-        except Exception as e:
-            logging.warning(f"Failed to load checkpoint: {e}, using current model state")
-
-    test_correct, test_loss = run_batch(
-        dataloader=test_dataloader,
-        model=model,
-        device=device,
-        loss_fn=loss_fn,
-        train=False,
-        desc="Testing",
-    )
-    wandb.log({"test_accuracy": test_correct, "test_loss": test_loss})
-    logging.info(f"Test accuracy: {test_correct:.2f}%")
-
-    return model
-
-
-def main():
-    utils.setup_logging()
-    device = utils.get_device()
-    logging.info(f"Using {device} device. Will save? {not args.no_save}")
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    if device.type == "cuda":
-        torch.set_float32_matmul_precision("medium")
-
-    if args.sweep:
-        run_sweep()
-    else:
-        run = wandb.init(
-            entity=args.entity,
-            project=args.project,
-            config=hyperparameters,
-        )
-
-        run_single_training(hyperparameters)
-
-        if not args.no_save:
-            logging.info(f"Saved PyTorch Model State to {utils.SIMPLE_MODEL_FILE}")
-            artifact = wandb.Artifact(name="simple_model", type="model")
-            artifact.add_file(utils.SIMPLE_MODEL_FILE)
-            run.log_artifact(artifact)
-        run.finish(0)
 
 
 def run_training(
@@ -309,51 +223,173 @@ def run_training(
                     "epoch": epoch,
                     "best_loss": best_loss,
                 }
-                torch.save(model_dict, utils.SIMPLE_MODEL_FILE)
+                torch.save(model_dict, models.CNN_MODEL_PATH)
         else:
             epochs_since_best += 1
         if config["patience"] == -1:
             continue  # add option to disable early stop
-        elif epochs_since_best >= config["patience"]:
+        elif epochs_since_best >= config["patience"] or args.check:
             break
 
     return model
 
 
-def run_sweep():
-    """Run hyperparameter sweep with wandb."""
-    print("Starting hyperparameter sweep...")
-    print(f"Sweep configuration: {sweep_config}")
+def run_single_fold(
+        dataset: Dataset,
+        fold_indices: List[List[int]],
+        test_fold: int,
+        config: dict,
+        device: torch.device,
+) -> float:
+    """Run training and testing for a single fold. Returns test accuracy."""
 
-    sweep_id = wandb.sweep(sweep_config, project=args.project, entity=args.entity)
-    print(f"Sweep ID: {sweep_id}")
-    print("Run the following command to start agents:")
-    print(f"wandb agent {args.entity}/{args.project}/{sweep_id}")
+    # Use fold 9 as validation if test_fold != 9, otherwise use fold 0
+    val_fold = 9 if test_fold != 9 else 0
 
-    wandb.agent(
-        sweep_id=sweep_id,
-        function=sweep_train,
-        project=args.project,
-        count=50,
+    # Get dataloaders for this fold
+    train_dl, val_dl, test_dl = get_fold_dataloaders(
+        dataset, fold_indices, test_fold, val_fold, config
     )
 
+    logging.info(f"Fold {test_fold + 1}: Train size={len(train_dl.dataset)}, "
+                 f"Val size={len(val_dl.dataset)}, Test size={len(test_dl.dataset)}")
 
-def sweep_train():
-    """Training function for wandb sweep."""
-    # Initialize wandb run with sweep config
-    run = wandb.init()
-    config = wandb.config
+    # Create fresh model for this fold
+    model = models.CNN()
+    model.to(device)
 
-    print("Running training with hyperparameters:")
-    for key, value in config.items():
-        print(f"  {key}: {value}")
+    loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=config["learning_rate"],
+        weight_decay=config["weight_decay"]
+    )
 
-    # Run training with sweep parameters
-    model = run_single_training(config)
+    # Train the model
+    model = run_training(
+        model=model,
+        train_dl=train_dl,
+        val_dl=val_dl,
+        device=device,
+        loss_fn=loss_fn,
+        optimizer=optimizer,
+        config=config,
+    )
 
-    run.finish(0)
-    return model
+    # Load best checkpoint if available
+    if not args.no_save:
+        try:
+            fold_model_path = f"{models.CNN_MODEL_PATH}_fold_{test_fold + 1}.pth"
+            checkpoint = torch.load(fold_model_path, weights_only=True, map_location=device)
+            model.load_state_dict(checkpoint["model_state_dict"])
+        except FileNotFoundError:
+            logging.warning(f"Checkpoint for fold {test_fold + 1} not found, using current model state")
+        except Exception as e:
+            logging.warning(f"Failed to load checkpoint for fold {test_fold + 1}: {e}")
 
+    # Test the model
+    test_correct, test_loss = run_batch(
+        dataloader=test_dl,
+        model=model,
+        device=device,
+        loss_fn=loss_fn,
+        train=False,
+        desc=f"Testing fold {test_fold + 1}",
+    )
+
+    wandb.log({
+        f"fold_{test_fold + 1}/test_accuracy": test_correct,
+        f"fold_{test_fold + 1}/test_loss": test_loss,
+    })
+
+    logging.info(f"Fold {test_fold + 1} test accuracy: {test_correct:.2f}%")
+    return test_correct
+
+
+def run_single_training(config=None):
+    """Run a single training session with given config."""
+    if config is None:
+        config = hyperparameters
+
+    if config["model_dim"] % config["num_heads"] != 0:
+        logging.error(
+            f"model_dim must be a multiple of num_heads, {config['model_dim']}, {config['num_heads']} not permitted"
+        )
+        return None
+    run = wandb.init(
+        entity=args.entity,
+        project=args.project,
+        config=config,
+    )
+
+    device = utils.get_device()
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    if device.type == "cuda":
+        torch.set_float32_matmul_precision("medium")
+
+    # Setup data
+    dataset, fold_indices = setup_data()
+
+    fold_accuracies = []
+    folds = 1 if args.check else 10
+    for test_fold in range(folds):
+        logging.info(f"\n{'=' * 50}")
+        logging.info(f"Starting fold {test_fold + 1}/{folds}")
+        logging.info(f"{'=' * 50}")
+
+        fold_accuracy = run_single_fold(
+            dataset=dataset,
+            fold_indices=fold_indices,
+            test_fold=test_fold,
+            config=config,
+            device=device,
+        )
+        fold_accuracies.append(fold_accuracy)
+
+    # Calculate final metrics
+    mean_accuracy = sum(fold_accuracies) / len(fold_accuracies)
+    std_accuracy = (sum((x - mean_accuracy) ** 2 for x in fold_accuracies) / len(fold_accuracies)) ** 0.5
+
+    # Log final results
+    final_results = {
+        "mean_test_accuracy": mean_accuracy,
+        "std_test_accuracy": std_accuracy,
+        "min_test_accuracy": min(fold_accuracies),
+        "max_test_accuracy": max(fold_accuracies),
+    }
+
+    # Log individual fold results
+    for i, acc in enumerate(fold_accuracies):
+        final_results[f"fold_{i + 1}_final_accuracy"] = acc
+
+    run.log(final_results)
+
+    logging.info(f"\n{'=' * 60}")
+    logging.info(f"10-FOLD CROSS-VALIDATION RESULTS")
+    logging.info(f"{'=' * 60}")
+    logging.info(f"Mean test accuracy: {mean_accuracy:.2f}% ± {std_accuracy:.2f}%")
+    logging.info(f"Min test accuracy: {min(fold_accuracies):.2f}%")
+    logging.info(f"Max test accuracy: {max(fold_accuracies):.2f}%")
+    logging.info(f"Individual fold accuracies: {[f'{acc:.2f}%' for acc in fold_accuracies]}")
+
+    if not args.check:
+        artifact = wandb.Artifact(name="cnn-classifier", type="model")
+        artifact.add_file(models.CNN_MODEL_PATH)
+        run.log_artifact(artifact)
+    run.finish(0, timeout=0)
+
+
+def main():
+    utils.setup_logging()
+
+    if args.sweep:
+        sweep_id = wandb.sweep(sweep_config, entity=args.entity, project=args.project)
+        wandb.agent(sweep_id, function=run_single_training)
+    else:
+        config = dict(hyperparameters)  # makes a shallow copy
+        config["git_commit"] = get_git_commit()
+        run_single_training(config)
 
 if __name__ == "__main__":
     main()

@@ -3,27 +3,56 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-VOCAB_SIZE = 13  # digits 0-9, plus start, finish, pad
-
-
-CNN_MODEL_PATTH="data/cnn_model.pth"
+CNN_MODEL_PATH="data/cnn_model.pth"
 
 class CNN(nn.Module):
     def __init__(self):
         super().__init__()
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.fc1 = nn.Linear(64*7*7, 128)
-        self.fc2 = nn.Linear(128,10)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.relu = nn.ReLU()
+        input_channels=1
+        num_classes=10
+        # Feature extraction layers
+        self.features = nn.Sequential(
+            # Block 1
+            nn.Conv2d(input_channels, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout2d(0.25),
+
+            # Block 2
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout2d(0.25),
+
+            # Block 3
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout2d(0.25),
+
+            # Block 4
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1)),  # Adaptive pooling handles any input size
+        )
+
+        # Classifier
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(256, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(128, num_classes)
+        )
 
     def forward(self, x):
-        x = self.pool(self.relu(self.conv1(x)))
-        x = self.pool(self.relu(self.conv2(x)))
-        x = x.view(-1, 64 * 7 * 7)
-        x = self.relu(self.fc1(x))
-        x = self.fc2(x)
+        x = self.features(x)
+        x = x.view(x.size(0), -1)  # Flatten
+        x = self.classifier(x)
         return x
 
 
@@ -245,41 +274,6 @@ class BaseTransformer(nn.Module):
             out = encoder(out)
         return out
 
-
-class VitTransformer(nn.Module):
-    def __init__(
-        self,
-        patch_size: int,
-        model_dim: int,
-        ffn_dim: int,
-        num_heads: int,
-        num_encoders: int,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        self.base_transformer = BaseTransformer(
-            patch_size=patch_size,
-            model_dim=model_dim,
-            ffn_dim=ffn_dim,
-            num_heads=num_heads,
-            num_encoders=num_encoders,
-            use_cls=True,
-            dropout=dropout,
-            max_pe_len=196,
-        )
-        self.mlp = nn.Sequential(
-            nn.LayerNorm(model_dim),
-            # force compression of information by halving model dim here (to improve generalisation)
-            nn.Linear(model_dim, model_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(model_dim // 2, 10),
-        )
-
-    def forward(self, x):
-        base = self.base_transformer(x)
-        cls = base[:, 0, :]
-        return self.mlp(cls)
 
 
 class ComplexTransformer(nn.Module):
