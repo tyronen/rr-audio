@@ -15,6 +15,16 @@ def preprocess_audio(audio_array, sample_rate=22050, n_mels=64, max_duration=4.0
     if audio_tensor.dim() > 1:
         audio_tensor = audio_tensor.mean(dim=0)
 
+    # ------------------------------------------------------------------
+    # Resample to a fixed target rate so that every spectrogram
+    # ends up with the same time dimension (avoids DataLoader stack errors)
+    target_sr = 22_050
+    if sample_rate != target_sr:
+        resampler = T.Resample(orig_freq=sample_rate, new_freq=target_sr)
+        audio_tensor = resampler(audio_tensor)
+        sample_rate = target_sr  # keep downstream logic consistent
+    # ------------------------------------------------------------------
+
     # First, fix the audio length to ensure consistent spectrogram size
     max_samples = int(max_duration * sample_rate)
     if len(audio_tensor) > max_samples:
@@ -48,11 +58,14 @@ def preprocess_audio(audio_array, sample_rate=22050, n_mels=64, max_duration=4.0
 class UrbanSoundDataset(Dataset):
     def __init__(self, hf_dataset):
         self.dataset = hf_dataset
+        self.cache = {}
 
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, idx):
+        if idx in self.cache:
+            return self.cache[idx]
         sample = self.dataset[idx]
 
         # Get audio and class
@@ -63,4 +76,6 @@ class UrbanSoundDataset(Dataset):
         # Preprocess audio to spectrogram
         spectrogram = preprocess_audio(audio, sample_rate)
 
-        return spectrogram, class_id
+        item = (spectrogram, class_id)
+        self.cache[idx] = item
+        return item
