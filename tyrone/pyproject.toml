@@ -4,17 +4,19 @@ name = "rr-audio-tyrone"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
+    "black>=25.1.0",
     "datasets>=3.6.0",
     "hf-transfer>=0.1.9",
+    "librosa>=0.11.0",
+    "matplotlib>=3.10.3",
+    "notebook>=7.4.3",
+    "soundfile>=0.13.1",
+    "torch>=2.6.0",
+    "torchaudio>=2.6.0",
+    "torchvision>=0.22.0",
     "tqdm>=4.67.1",
     "transformers>=4.53.0",
     "wandb>=0.20.1",
-    "black>=25.1.0",
-    "matplotlib>=3.10.3",
-    "notebook>=7.4.3",
-    "streamlit>=1.46.0",
-    "torch>=2.6.0",
-    "torchvision>=0.22.0",
 ]
