@@ -17,12 +17,11 @@ from tqdm import tqdm
 import models
 import utils
 
-
 # --- Hyperparameters ---
 hyperparameters = {
     "batch_size": 512,
     "learning_rate": 8e-4,
-    "epochs": 5,
+    "epochs": 30,
     "patience": 3,
     "seed": 42,
     "dropout": 0.15,
