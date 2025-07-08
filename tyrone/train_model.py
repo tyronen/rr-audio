@@ -22,7 +22,7 @@ hyperparameters = {
     "batch_size": 512,
     "learning_rate": 8e-4,
     "epochs": 30,
-    "patience": 3,
+    "patience": 6,
     "seed": 42,
     "dropout": 0.15,
     "weight_decay": 1e-4,
