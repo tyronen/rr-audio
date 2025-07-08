@@ -22,8 +22,8 @@ import utils
 hyperparameters = {
     "batch_size": 512,
     "learning_rate": 8e-4,
-    "epochs": 30,
-    "patience": 6,
+    "epochs": 5,
+    "patience": 3,
     "seed": 42,
     "dropout": 0.15,
     "weight_decay": 1e-4,
@@ -65,6 +65,23 @@ def get_model_file_path(test_fold: int) -> str:
     """Generates a unique path for each fold's checkpoint."""
     base = models.ENCODER_MODEL_PATH if args.encoder else models.CNN_MODEL_PATH
     return base.replace(".pth", f"_fold_{test_fold + 1}.pth")
+
+
+def save_ckpt(state_dict, path: str):
+    """
+    Save `state_dict` safely in a DDP job.
+    Only rank‑0 writes, with an atomic rename to avoid partial files.
+    """
+    # Make sure all ranks reach this point
+    if dist.is_initialized():
+        rank = dist.get_rank()
+    else:
+        rank = 0
+
+    if rank == 0:
+        tmp_path = path + ".tmp"
+        torch.save(state_dict, tmp_path)
+        os.replace(tmp_path, path)
 
 
 class UrbanSoundDataset(Dataset):
@@ -217,14 +234,23 @@ def run_fold_training(
                     f"fold_{test_fold + 1}/val_acc": val_acc,
                 }
             )
-        if val_loss < best_val_loss:
+
+        if dist.is_initialized():
+            t = torch.tensor(val_loss, device=device)
+            dist.all_reduce(t, op=dist.ReduceOp.SUM)
+            val_loss = (t / dist.get_world_size()).item()
+            dist.barrier()
+        is_best = val_loss < best_val_loss
+        if is_best and is_main_process():
             best_val_loss = val_loss
             epochs_no_improve = 0
             ## DDP Note: Unwrap the model before saving the state_dict.
             model_to_save = model.module if isinstance(model, DDP) else model
-            torch.save(model_to_save.state_dict(), get_model_file_path(test_fold))
+            save_ckpt(model_to_save.state_dict(), get_model_file_path(test_fold))
         else:
             epochs_no_improve += 1
+        if dist.is_initialized():
+            dist.barrier()
 
         early_stop_local = is_main_process() and (
             epochs_no_improve >= config["patience"] or args.check
@@ -284,6 +310,8 @@ def run_single_fold(dataset, fold_indices, test_fold, config, device):
         model, train_dl, val_dl, loss_fn, optimizer, config, device, test_fold
     )
 
+    if dist.is_initialized():
+        dist.barrier()
     # Load the best performing model for testing
     if is_main_process():
         model_to_test = model.module if isinstance(model, DDP) else model
