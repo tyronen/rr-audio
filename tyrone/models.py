@@ -3,13 +3,15 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-CNN_MODEL_PATH="data/cnn_model.pth"
+CNN_MODEL_PATH = "data/cnn_model.pth"
+ENCODER_MODEL_PATH = "data/encoder_model.pth"
+
 
 class CNN(nn.Module):
     def __init__(self):
         super().__init__()
-        input_channels=1
-        num_classes=10
+        input_channels = 1
+        num_classes = 10
         # Feature extraction layers
         self.features = nn.Sequential(
             # Block 1
@@ -18,21 +20,18 @@ class CNN(nn.Module):
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2, 2),
             nn.Dropout2d(0.25),
-
             # Block 2
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2, 2),
             nn.Dropout2d(0.25),
-
             # Block 3
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2, 2),
             nn.Dropout2d(0.25),
-
             # Block 4
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
@@ -46,7 +45,7 @@ class CNN(nn.Module):
             nn.Linear(256, 128),
             nn.ReLU(inplace=True),
             nn.Dropout(0.5),
-            nn.Linear(128, num_classes)
+            nn.Linear(128, num_classes),
         )
 
     def forward(self, x):
@@ -74,7 +73,9 @@ class PositionalEncoding(nn.Module):
             # Fixed sinusoidal positional encoding (original implementation)
             pe = torch.zeros(max_len, model_dim)
             position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-            div_term = torch.exp(torch.arange(0, model_dim, 2) * -(math.log(10_000.0) / model_dim))
+            div_term = torch.exp(
+                torch.arange(0, model_dim, 2) * -(math.log(10_000.0) / model_dim)
+            )
             broadcast = position * div_term
             pe[:, 0::2] = torch.sin(broadcast)
             pe[:, 1::2] = torch.cos(broadcast)
@@ -87,18 +88,25 @@ class PositionalEncoding(nn.Module):
         return x + F.dropout(pe, p=0.1, training=self.training)
 
 
-class Patchify(nn.Module):
-    # think of each patch as an image token (i.e. as a word, if this was NLP)
+class SpectrogramPatchEmbedding(nn.Module):
+    """Convert 2D spectrogram to sequence of patch embeddings."""
+
     def __init__(self, patch_size: int, model_dim: int):
         super().__init__()
-        # use conv2d to unfold each image into patches (more efficient on GPU)
-        self.proj = nn.Conv2d(1, model_dim, kernel_size=patch_size, stride=patch_size, bias=False)
-        # optionally normalise patch embeddings before they enter the transformer proper
+        self.patch_size = patch_size
+        self.proj = nn.Conv2d(1, model_dim, kernel_size=patch_size, stride=patch_size)
         self.norm = nn.LayerNorm(model_dim)
 
     def forward(self, x):
-        x = self.proj(x).flatten(2)
-        x = x.permute(0, 2, 1)
+        # x: [batch_size, 1, mel_bins, time_frames]
+        x = self.proj(x)  # [batch_size, model_dim, mel_patches, time_patches]
+
+        # Flatten spatial dimensions to create sequence
+        B, C, H, W = x.shape
+        x = x.reshape(B, C, H * W).transpose(
+            1, 2
+        )  # [batch_size, num_patches, model_dim]
+
         return self.norm(x)
 
 
@@ -114,7 +122,9 @@ def attention(k_dim, q, k, v, mask_tensor):
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, model_dim: int, num_heads: int, mask: bool, dropout: float = 0.1):
+    def __init__(
+        self, model_dim: int, num_heads: int, mask: bool, dropout: float = 0.1
+    ):
         super().__init__()
         self.num_heads = num_heads
         self.model_dim = model_dim
@@ -137,7 +147,9 @@ class SelfAttention(nn.Module):
 
         mask_tensor = None
         if self.mask:
-            mask_tensor = torch.triu(torch.ones(L, L, device=x.device), diagonal=1).bool()
+            mask_tensor = torch.triu(
+                torch.ones(L, L, device=x.device), diagonal=1
+            ).bool()
 
         attended = attention(self.k_dim, qh, kh, vh, mask_tensor=mask_tensor)
         concatted = attended.transpose(1, 2).reshape(B, L, self.model_dim)
@@ -217,7 +229,9 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, model_dim: int, ffn_dim: int, num_heads: int, dropout: float):
         super().__init__()
-        self.masked_self_mha = SelfAttention(model_dim=model_dim, num_heads=num_heads, mask=True)
+        self.masked_self_mha = SelfAttention(
+            model_dim=model_dim, num_heads=num_heads, mask=True
+        )
         self.norm1 = nn.LayerNorm(model_dim)
         self.cross_mha = CrossAttention(model_dim=model_dim, num_heads=num_heads)
         self.norm2 = nn.LayerNorm(model_dim)
@@ -234,24 +248,27 @@ class Decoder(nn.Module):
         return self.norm3(addnormed_stage2 + self.dropout(ffned))
 
 
-class BaseTransformer(nn.Module):
+class AudioTransformer(nn.Module):
     def __init__(
         self,
-        patch_size: int,
         model_dim: int,
         ffn_dim: int,
         num_heads: int,
         num_encoders: int,
-        max_pe_len: int,
-        use_cls: bool,
         dropout: float,
+        patch_size: int,
     ):
         super().__init__()
-        self.patchify = Patchify(patch_size, model_dim)
-        self.use_cls = use_cls
-        self.pe = PositionalEncoding(model_dim, max_pe_len)
-        self.cls_token = nn.Parameter(torch.randn(1, 1, model_dim))
 
+        # Convert 2D spectrogram to sequence of patches
+        self.patch_embed = SpectrogramPatchEmbedding(
+            patch_size=patch_size, model_dim=model_dim
+        )
+
+        # Positional encoding
+        self.pos_encoding = PositionalEncoding(model_dim, max_len=1000)
+
+        # Transformer encoders
         def make_encoder() -> nn.Module:
             return Encoder(
                 model_dim=model_dim,
@@ -260,20 +277,42 @@ class BaseTransformer(nn.Module):
                 dropout=dropout,
             )
 
-        self.encoder_series = nn.ModuleList([make_encoder() for _ in range(num_encoders)])
+        self.encoder_series = nn.ModuleList(
+            [make_encoder() for _ in range(num_encoders)]
+        )
+
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(model_dim), nn.Dropout(dropout), nn.Linear(model_dim, 10)
+        )
+
+        # Global average pooling for classification
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
 
     def forward(self, x):
-        B = x.size(0)
-        patched = self.patchify(x)
-        D = patched.size(-1)
-        out = self.pe(patched)
-        if self.use_cls:
-            cls_expanded = self.cls_token.expand(B, 1, D)
-            out = torch.cat([cls_expanded, out], dim=1)
-        for encoder in self.encoder_series:
-            out = encoder(out)
-        return out
+        # x shape: [batch_size, 1, mel_bins, time_frames] e.g., [32, 1, 64, 173]
 
+        # Convert to patches and embed
+        x = self.patch_embed(x)  # [batch_size, num_patches, model_dim]
+
+        # Add positional encoding
+        x = self.pos_encoding(x)
+
+        # Pass through transformer encoders
+        for encoder in self.encoder_series:
+            x = encoder(x)
+
+        # Global average pooling: [batch_size, num_patches, model_dim] -> [batch_size, model_dim]
+        x = x.transpose(1, 2)  # [batch_size, model_dim, num_patches]
+        x = self.global_pool(x).squeeze(-1)  # [batch_size, model_dim]
+
+        # Classification
+        x = self.classifier(x)  # [batch_size, num_classes]
+
+        return x
+
+
+VOCAB_SIZE = 13  # placeholder we will rework this later
 
 
 class ComplexTransformer(nn.Module):
@@ -298,7 +337,9 @@ class ComplexTransformer(nn.Module):
             use_cls=False,
             max_pe_len=64,
         )
-        self.embedding = nn.Embedding(num_embeddings=VOCAB_SIZE, embedding_dim=model_dim)
+        self.embedding = nn.Embedding(
+            num_embeddings=VOCAB_SIZE, embedding_dim=model_dim
+        )
         self.pe = torch.nn.Embedding(5, model_dim)
         self.register_buffer("rng", torch.arange(5))
 
