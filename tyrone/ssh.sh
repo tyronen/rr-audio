@@ -10,7 +10,8 @@ eval "$(ssh-agent -s)"
 ssh-add .ssh/id_ed25519
 cd /workspace
 
-git clone git@github.com:tyronen/rr-audio.git || true
+
+
 cd rr-audio
 git pull
 git status

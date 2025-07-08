@@ -7,9 +7,8 @@ import json
 import torch
 from torch.utils.data import Dataset
 
-import torch.distributed as dist
 import wandb
-from torch import nn, optim
+from torch import nn, optim, distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Subset
 from torch.utils.data.distributed import DistributedSampler
@@ -45,7 +44,21 @@ parser.add_argument(
 parser.add_argument("--encoder", action="store_true", help="Use the encoder or the cnn")
 args = parser.parse_args()
 
-# --- Core Functions ---
+
+def setup_ddp():
+    """Initializes the distributed process group."""
+    dist.init_process_group(backend="nccl")
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+
+
+def cleanup_ddp():
+    """Cleans up the distributed process group."""
+    dist.destroy_process_group()
+
+
+def is_main_process():
+    """Checks if the current process is the main one (rank 0)."""
+    return not dist.is_initialized() or dist.get_rank() == 0
 
 
 def get_model_file_path(test_fold: int) -> str:
@@ -64,7 +77,7 @@ class UrbanSoundDataset(Dataset):
 
     def __getitem__(self, idx):
         item_info = self.metadata[idx]
-        spectrogram = torch.load(item_info["path"])
+        spectrogram = torch.load(item_info["path"], weights_only=True)
         class_id = item_info["class_id"]
         return spectrogram, class_id
 
@@ -154,9 +167,7 @@ def run_batch(model, dataloader, loss_fn, device, optimizer=None, desc=""):
 
     total_loss, correct, total_samples = 0.0, 0, 0
 
-    iterator = tqdm(
-        dataloader, desc=desc, disable=not utils.is_main_process(), leave=False
-    )
+    iterator = tqdm(dataloader, desc=desc, disable=not is_main_process(), leave=False)
     context = torch.enable_grad() if is_train else torch.no_grad()
     maybe_autocast, scaler = utils.amp_components(device, train=is_train)
 
@@ -197,7 +208,7 @@ def run_fold_training(
             model, val_dl, loss_fn, device, desc=f"Validating epoch {epoch + 1}"
         )
 
-        if utils.is_main_process():
+        if is_main_process():
             wandb.log(
                 {
                     f"fold_{test_fold + 1}/train_loss": train_loss,
@@ -206,18 +217,29 @@ def run_fold_training(
                     f"fold_{test_fold + 1}/val_acc": val_acc,
                 }
             )
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                epochs_no_improve = 0
-                ## DDP Note: Unwrap the model before saving the state_dict.
-                model_to_save = model.module if isinstance(model, DDP) else model
-                torch.save(model_to_save.state_dict(), get_model_file_path(test_fold))
-            else:
-                epochs_no_improve += 1
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            epochs_no_improve = 0
+            ## DDP Note: Unwrap the model before saving the state_dict.
+            model_to_save = model.module if isinstance(model, DDP) else model
+            torch.save(model_to_save.state_dict(), get_model_file_path(test_fold))
+        else:
+            epochs_no_improve += 1
 
-            if epochs_no_improve >= config["patience"]:
-                logging.info(f"Early stopping triggered at epoch {epoch + 1}.")
-                break
+        early_stop_local = is_main_process() and (
+            epochs_no_improve >= config["patience"] or args.check
+        )
+        early_stop_tensor = torch.tensor(
+            [early_stop_local], device=device, dtype=torch.uint8
+        )
+
+        if dist.is_initialized():
+            # share the decision (bool -> int tensor) with all ranks
+            dist.broadcast(early_stop_tensor, src=0)
+
+        early_stop = bool(early_stop_tensor.item())
+        if early_stop:
+            break
     return model
 
 
@@ -241,7 +263,7 @@ def run_single_fold(dataset, fold_indices, test_fold, config, device):
         dataset, fold_indices, test_fold, val_fold, config
     )
 
-    if utils.is_main_process():
+    if is_main_process():
         logging.info(
             f"Fold {test_fold + 1}: Train={len(train_dl.dataset)}, Val={len(val_dl.dataset)}, Test={len(test_dl.dataset)}"
         )
@@ -263,10 +285,12 @@ def run_single_fold(dataset, fold_indices, test_fold, config, device):
     )
 
     # Load the best performing model for testing
-    if utils.is_main_process():
+    if is_main_process():
         model_to_test = model.module if isinstance(model, DDP) else model
         model_to_test.load_state_dict(
-            torch.load(get_model_file_path(test_fold), map_location=device)
+            torch.load(
+                get_model_file_path(test_fold), map_location=device, weights_only=True
+            )
         )
         test_acc, _ = run_batch(
             model_to_test,
@@ -288,7 +312,7 @@ def main():
     ## DDP Note: Check for environment variables set by torchrun to setup DDP.
     is_ddp = "WORLD_SIZE" in os.environ
     if is_ddp:
-        utils.setup_ddp()
+        setup_ddp()
 
     device = torch.device(
         f"cuda:{os.environ['LOCAL_RANK']}"
@@ -296,7 +320,7 @@ def main():
         else "cuda" if torch.cuda.is_available() else "cpu"
     )
 
-    if utils.is_main_process():
+    if is_main_process():
         project = "encoder-classifier" if args.encoder else "cnn-classifier"
         wandb.init(entity=args.entity, project=project, config=hyperparameters)
 
@@ -305,7 +329,7 @@ def main():
     num_folds = 1  # to save time only one fold
 
     for test_fold in range(num_folds):
-        if utils.is_main_process():
+        if is_main_process():
             logging.info(
                 f"\n{'=' * 50}\nStarting Fold {test_fold + 1}/{num_folds}\n{'=' * 50}"
             )
@@ -313,10 +337,10 @@ def main():
         fold_acc = run_single_fold(
             dataset, fold_indices, test_fold, hyperparameters, device
         )
-        if utils.is_main_process() and fold_acc is not None:
+        if is_main_process() and fold_acc is not None:
             fold_accuracies.append(fold_acc)
 
-    if utils.is_main_process():
+    if is_main_process():
         mean_acc = sum(fold_accuracies) / len(fold_accuracies)
         std_acc = (
             sum((x - mean_acc) ** 2 for x in fold_accuracies) / len(fold_accuracies)
@@ -325,10 +349,10 @@ def main():
             f"\n{'=' * 50}\n10-Fold CV Results: {mean_acc:.2f}% ± {std_acc:.2f}%\n{'=' * 50}"
         )
         wandb.log({"mean_test_accuracy": mean_acc, "std_test_accuracy": std_acc})
-        wandb.finish()
+        wandb.finish(0)
 
     if is_ddp:
-        utils.cleanup_ddp()
+        cleanup_ddp()
 
 
 if __name__ == "__main__":

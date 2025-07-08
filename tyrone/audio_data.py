@@ -44,13 +44,13 @@ def preprocess_audio(audio_array, sample_rate=22050, n_mels=64, max_duration=4.0
 
 
 # A worker function to process and save one item.
-def process_and_save(sample, index):
+def process_and_save(index, sample):
     """Processes a single audio sample and saves the spectrogram to disk."""
     # Extract metadata
-    audio_array = sample['audio']['array']
-    sample_rate = sample['audio']['sampling_rate']
-    class_id = sample['classID']
-    fold = sample['fold']
+    audio_array = sample["audio"]["array"]
+    sample_rate = sample["audio"]["sampling_rate"]
+    class_id = sample["classID"]
+    fold = sample["fold"]
 
     # Create the spectrogram
     spectrogram = preprocess_audio(audio_array, sample_rate)
@@ -65,34 +65,37 @@ def process_and_save(sample, index):
     # Return the metadata to be saved later
     return {"path": output_path, "class_id": class_id, "fold": fold}
 
+
 def main():
     utils.setup_logging()
     """Loads data, preprocesses it in parallel, and saves results to disk."""
     os.makedirs(SPECTROGRAM_DIR, exist_ok=True)
 
     # Load the raw dataset
-    raw_data = datasets.load_dataset("danavery/urbansound8K", split='train')
+    raw_data = tqdm(datasets.load_dataset("danavery/urbansound8K", split="train"))
 
     # Use multiprocessing to speed up the preprocessing
     # os.cpu_count() uses all available CPU cores
     num_processes = os.cpu_count()
-    logging.info(f"Starting preprocessing with {num_processes} processes...")
-
     # Create a partial function to pass the output_dir to the worker
     worker_func = partial(process_and_save)
 
     # Create a pool of workers
+    logging.info(f"Starting preprocessing with {num_processes} processes...")
     with multiprocessing.Pool(processes=num_processes) as pool:
         # Use tqdm for a progress bar
-        results = list(tqdm(pool.starmap(worker_func, enumerate(raw_data)), total=len(raw_data)))
+        results = list(
+            tqdm(pool.starmap(worker_func, enumerate(raw_data)), total=len(raw_data))
+        )
 
     # Save the metadata for all processed files
     metadata_path = os.path.join(SPECTROGRAM_DIR, "metadata.json")
-    with open(metadata_path, 'w') as f:
+    with open(metadata_path, "w") as f:
         json.dump(results, f, indent=4)
 
     logging.info(f"Preprocessing complete. Spectrograms saved in '{SPECTROGRAM_DIR}'.")
     logging.info(f"Metadata saved to '{metadata_path}'.")
+
 
 if __name__ == "__main__":
     main()

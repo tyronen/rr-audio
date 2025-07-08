@@ -315,50 +315,50 @@ class AudioTransformer(nn.Module):
 VOCAB_SIZE = 13  # placeholder we will rework this later
 
 
-class ComplexTransformer(nn.Module):
-    def __init__(
-        self,
-        patch_size: int,
-        model_dim: int,
-        ffn_dim: int,
-        num_heads: int,
-        num_coders: int,
-        dropout: float,
-        train_pe: bool,
-    ):
-        super().__init__()
-        self.base_transformer = BaseTransformer(
-            patch_size=patch_size,
-            model_dim=model_dim,
-            ffn_dim=ffn_dim,
-            num_heads=num_heads,
-            num_encoders=num_coders,
-            dropout=dropout,
-            use_cls=False,
-            max_pe_len=64,
-        )
-        self.embedding = nn.Embedding(
-            num_embeddings=VOCAB_SIZE, embedding_dim=model_dim
-        )
-        self.pe = torch.nn.Embedding(5, model_dim)
-        self.register_buffer("rng", torch.arange(5))
-
-        def make_decoder() -> nn.Module:
-            return Decoder(
-                model_dim=model_dim,
-                ffn_dim=ffn_dim,
-                num_heads=num_heads,
-                dropout=dropout,
-            )
-
-        self.decoder_series = nn.ModuleList([make_decoder() for _ in range(num_coders)])
-
-        self.linear = nn.Linear(model_dim, VOCAB_SIZE)
-
-    def forward(self, images, input_seqs):
-        encoded = self.base_transformer(images)
-        text = self.embedding(input_seqs)
-        text = text + self.pe(self.rng[: text.size(1)])  # type: ignore
-        for decoder in self.decoder_series:
-            text = decoder(encoded, text)
-        return self.linear(text)
+# class ComplexTransformer(nn.Module):
+#     def __init__(
+#         self,
+#         patch_size: int,
+#         model_dim: int,
+#         ffn_dim: int,
+#         num_heads: int,
+#         num_coders: int,
+#         dropout: float,
+#         train_pe: bool,
+#     ):
+#         super().__init__()
+#         self.base_transformer = BaseTransformer(
+#             patch_size=patch_size,
+#             model_dim=model_dim,
+#             ffn_dim=ffn_dim,
+#             num_heads=num_heads,
+#             num_encoders=num_coders,
+#             dropout=dropout,
+#             use_cls=False,
+#             max_pe_len=64,
+#         )
+#         self.embedding = nn.Embedding(
+#             num_embeddings=VOCAB_SIZE, embedding_dim=model_dim
+#         )
+#         self.pe = torch.nn.Embedding(5, model_dim)
+#         self.register_buffer("rng", torch.arange(5))
+#
+#         def make_decoder() -> nn.Module:
+#             return Decoder(
+#                 model_dim=model_dim,
+#                 ffn_dim=ffn_dim,
+#                 num_heads=num_heads,
+#                 dropout=dropout,
+#             )
+#
+#         self.decoder_series = nn.ModuleList([make_decoder() for _ in range(num_coders)])
+#
+#         self.linear = nn.Linear(model_dim, VOCAB_SIZE)
+#
+#     def forward(self, images, input_seqs):
+#         encoded = self.base_transformer(images)
+#         text = self.embedding(input_seqs)
+#         text = text + self.pe(self.rng[: text.size(1)])  # type: ignore
+#         for decoder in self.decoder_series:
+#             text = decoder(encoded, text)
+#         return self.linear(text)
