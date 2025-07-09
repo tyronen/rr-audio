@@ -8,94 +8,66 @@ type Chunk = {
 export default function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [chunks, setChunks] = useState<Chunk[]>([]);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const chunkIdRef = useRef(0);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const transcriptRef = useRef<HTMLDivElement | null>(null);
-  const sliceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    // Start or stop recording whenever `isRecording` changes
     if (!isRecording) return;
 
-      setChunks([]);
+    setChunks([]);
+
     async function startRecording() {
+      // Open or reuse WebSocket
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        wsRef.current = new WebSocket("ws://localhost:8000/ws");
+        wsRef.current.onmessage = (e) => {
+          try {
+            const { chunk_id, text } = JSON.parse(e.data);
+            setChunks((prev) => [...prev, { id: chunk_id, text }]);
+          } catch (err) {
+            console.error("bad ws message", err);
+          }
+        };
+      }
+      const ws = wsRef.current!;
+
+      // Audio context & worklet
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const ctx = new AudioContext({ sampleRate: 16000 });
+      audioCtxRef.current = ctx;
 
-      // Decide which container the current browser supports
-      let mimeType = "audio/ogg;codecs=opus";
-      if (!MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = "audio/webm;codecs=opus";
-      }
+      await ctx.audioWorklet.addModule("/pcm-processor.js");
+      const source = ctx.createMediaStreamSource(stream);
+      const workletNode = new AudioWorkletNode(ctx, "pcm-processor");
+      workletNodeRef.current = workletNode;
 
-      const recorder = new MediaRecorder(stream, { mimeType });
-      mediaRecorderRef.current = recorder;
-
-      recorder.ondataavailable = async (evt) => {
-        if (!evt.data || evt.data.size === 0) return;
-
-        const chunkId = chunkIdRef.current++;
-        const form = new FormData();
-        const ext = mimeType.startsWith("audio/ogg") ? "ogg" : "webm";
-        form.append("audio", evt.data, `chunk-${chunkId}.${ext}`);
-        form.append('chunk_id', String(chunkId));
-
-        try {
-          const response = await fetch('http://localhost:8000/transcribe', {
-            method: 'POST',
-            body: form,
-          });
-          const { text } = await response.json();
-          setChunks((prev) => [...prev, { id: chunkId, text }]);
-        } catch (err) {
-          console.error('transcription failed', err);
+      workletNode.port.onmessage = (event) => {
+        const float32 = event.data as Float32Array;
+        // Convert Float32 [-1,1] to Int16 PCM
+        const int16 = new Int16Array(float32.length);
+        for (let i = 0; i < float32.length; i++) {
+          const s = Math.max(-1, Math.min(1, float32[i]));
+          int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
         }
+        ws.send(int16.buffer);
       };
 
-      recorder.start();
-      const scheduleNext = () => {
-          sliceTimer.current = setTimeout(() => {
-              if (recorder.state === 'recording') {
-                  recorder.stop();
-              }
-          }, 2_000);
-      };
-      scheduleNext();
-
-      recorder.onstop = () => {
-          if (sliceTimer.current) {
-              clearTimeout(sliceTimer.current);
-          }
-          if (isRecording) {
-              startRecording().catch(console.error);
-          } else {
-              recorder.stream.getTracks().forEach((t) => t.stop());
-          }
-      }
+      source.connect(workletNode).connect(ctx.destination);
     }
 
     startRecording();
 
     return () => {
-      // Gracefully stop the MediaRecorder and flush remaining data
-      const rec = mediaRecorderRef.current;
-      if (!rec) return;
-
-      if (rec.state !== 'inactive') {
-        // Ask for the last buffered data ( < 30 s )
-        rec.requestData();
-
-        // After recorder finishes emitting the final `dataavailable`,
-        // release the underlying tracks.
-        rec.onstop = () => {
-          rec.stream.getTracks().forEach((t) => t.stop());
-        };
-
-        rec.stop();
+      if (audioCtxRef.current) {
+        audioCtxRef.current.close();
+        audioCtxRef.current = null;
       }
-      if (sliceTimer.current) {
-        clearTimeout(sliceTimer.current);
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.close(1000, "done");
       }
-      mediaRecorderRef.current = null;
+      workletNodeRef.current = null;
     };
   }, [isRecording]);
 

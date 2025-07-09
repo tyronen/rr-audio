@@ -14,6 +14,9 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import json
+import numpy as np  # pip install numpy
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 
 @asynccontextmanager
@@ -194,6 +197,65 @@ async def transcribe(
         )
 
     return await asyncio.to_thread(_do_transcribe_sync)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket endpoint for raw 16-kHz PCM streaming
+# ---------------------------------------------------------------------------
+
+
+@app.websocket("/ws")
+async def websocket_pcm(websocket: WebSocket):
+    """
+    Client sends binary Int16 PCM frames (little-endian, 16 kHz, mono).
+    We keep a simple ring-buffer; every 32 000 samples (~2 s) we run the
+    Whisper pipeline and push the text back.
+
+    Outgoing message shape:
+        {"chunk_id": <int>, "text": "<transcript>"}
+    """
+    await websocket.accept()
+
+    # Make sure the ASR model is loaded
+    global asr_pipe
+    if asr_pipe is None:
+        await websocket.close(code=1011, reason="ASR model not ready")
+        return
+
+    WINDOW = 32_000  # 2 s × 16 kHz = 32 000 samples
+    ring = np.empty((0,), dtype=np.int16)  # rolling PCM buffer
+    chunk_id = 0
+
+    try:
+        while True:
+            # Receive raw PCM bytes
+            frame = await websocket.receive_bytes()
+            samples = np.frombuffer(frame, dtype=np.int16)
+            if samples.size == 0:
+                continue
+
+            # Append to ring-buffer
+            ring = np.concatenate((ring, samples))
+
+            # ßProcess every full 2-second window
+            while ring.size >= WINDOW:
+                window = ring[:WINDOW].astype(np.float32) / 32768.0  # [-1, 1]
+                ring = ring[WINDOW:]  # pop
+
+                result = asr_pipe(
+                    window,
+                    return_timestamps=False,
+                )
+                text = result["text"].strip()
+
+                await websocket.send_text(
+                    json.dumps({"chunk_id": chunk_id, "text": text})
+                )
+                chunk_id += 1
+
+    except WebSocketDisconnect:
+        # Client hung up – just exit the coroutine
+        return
 
 
 @app.post("/feedback")

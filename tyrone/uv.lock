@@ -229,6 +229,23 @@ wheels = [
 ]
 
 [[package]]
+name = "av"
+version = "15.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/17/89/940a509ee7e9449f0c877fa984b37b7cc485546035cc67bbc353f2ac20f3/av-15.0.0.tar.gz", hash = "sha256:871c1a9becddf00b60b1294dc0bff9ff193ac31286aeec1a34039bd27e650183", size = 3833128, upload-time = "2025-07-03T16:23:48.455Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/2a/40e0ec34e8235e4a1f9fe60288cd1eebe6413765931b5b74aeb3ce79c422/av-15.0.0-cp311-cp311-macosx_13_0_arm64.whl", hash = "sha256:eb19386466aafbac4ede549ed7dc6198714e8d35ecc238d5b5c0d91e770d53d4", size = 21793541, upload-time = "2025-07-03T16:21:48.819Z" },
+    { url = "https://files.pythonhosted.org/packages/7d/21/74acec5492a901699a94715e94cb83772679b92183592a3d8b3e58cf0202/av-15.0.0-cp311-cp311-macosx_13_0_x86_64.whl", hash = "sha256:e3c841befff26823524f3260d29fb3162540535c43238587b24226d345c82af3", size = 26973175, upload-time = "2025-07-03T16:21:51.63Z" },
+    { url = "https://files.pythonhosted.org/packages/7b/d9/04e7fc09c6246aaf8e695620cc026779e366c49dcab561f8f434fbed3256/av-15.0.0-cp311-cp311-manylinux2014_i686.manylinux_2_17_i686.whl", hash = "sha256:fe50ddab68af27bb9f7123dac5b1ff43ee8c7d941499c625018f3cac7da01ff3", size = 34423925, upload-time = "2025-07-03T16:21:54.628Z" },
+    { url = "https://files.pythonhosted.org/packages/19/e0/f4a93c901d65188ffe21e182499abf5304403f47e24da001b21042c888ec/av-15.0.0-cp311-cp311-manylinux_2_28_aarch64.whl", hash = "sha256:5877f9dacf04bba9e966e0feb707e0fc2955476dc50cc6de5707604f51440e1b", size = 38178587, upload-time = "2025-07-03T16:21:57.966Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/64/6dcfb449ed287a590ecf70d6259f1f2c06fa9a576996f53d1949d65c4ee5/av-15.0.0-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:e2a5f0d1817ab73370fdb35e2e2ecd4c2e5a45d43b8d96d5ae8dfe86098fb9b3", size = 39683188, upload-time = "2025-07-03T16:22:01.315Z" },
+    { url = "https://files.pythonhosted.org/packages/a9/ef/a89775afc0487a4f5ab892b423972ae47bd3ef004faeb666135c657ea308/av-15.0.0-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:710ad0307da524be553db123c0681edadb5cefc15baa49cf25217364fb7a80b5", size = 40230243, upload-time = "2025-07-03T16:22:04.811Z" },
+    { url = "https://files.pythonhosted.org/packages/35/4b/39c40ce50c7290b5091afe75264c31bb1afb53e918c16991c808131a5d27/av-15.0.0-cp311-cp311-musllinux_1_2_i686.whl", hash = "sha256:d275d3015ab13aadc7bf38df3b2398ad992e30b1685cd350fd46c71913e98af4", size = 37059511, upload-time = "2025-07-03T16:22:09.216Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/39/947815be601b2dc9f43ea59fc5582cb7125070ef352cb0157ea29b98b796/av-15.0.0-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:5b300f824a7ca1854ca29a37265281fa07d3dd0f69a6d2ff55d4c54ee3d734e2", size = 40993811, upload-time = "2025-07-03T16:22:12.524Z" },
+    { url = "https://files.pythonhosted.org/packages/de/ca/0c77802f70248bc3e182451a174db30fca349858840c4fbf1c7f8e1beaa0/av-15.0.0-cp311-cp311-win_amd64.whl", hash = "sha256:cb7a85b4fe853a9c2725cdf02f457221fcc24f0391c8333b25a3a889e16ff26d", size = 31358970, upload-time = "2025-07-03T16:22:15.78Z" },
+]
+
+[[package]]
 name = "babel"
 version = "2.17.0"
 source = { registry = "https://pypi.org/simple" }
@@ -423,6 +440,23 @@ wheels = [
 ]
 
 [[package]]
+name = "ctranslate2"
+version = "4.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pyyaml" },
+    { name = "setuptools" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/17/d9/1857a64cdbaf3c514e145d5bb06f4c659689ad086054e3c87874c29f1e5e/ctranslate2-4.6.0-cp311-cp311-macosx_10_13_x86_64.whl", hash = "sha256:2f80538ce0f619540499b505747179ee5e86a5c9b80361c1582f7c725d660509", size = 13301999, upload-time = "2025-04-08T19:49:35.962Z" },
+    { url = "https://files.pythonhosted.org/packages/61/bf/42a5c004547b92cfacad221e126af182c7d98471a44cfdc41bc09c9a929a/ctranslate2-4.6.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:00097c52bf6be97f753e39bc7399f23bdf9803df942094b8cecdd8432f0335d5", size = 1291210, upload-time = "2025-04-08T19:49:38.044Z" },
+    { url = "https://files.pythonhosted.org/packages/33/83/1cf0b771778830fc9d00d166b90aabf27d5b5df4874d92ce5e7c4ea9e090/ctranslate2-4.6.0-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:9f4691a66cb7b9ffb04ebff4291055c20223449a6534c4a52b7432b0853946d0", size = 17419689, upload-time = "2025-04-08T19:49:39.345Z" },
+    { url = "https://files.pythonhosted.org/packages/3f/89/5991e0e7333b9f4d2022ea817c0017d4cbc6891be1b3b190a0112f753430/ctranslate2-4.6.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:79e4f2e8ea7f24797c80e0f4593d30447ef8da9036ebb4402b7f6c54687b7a46", size = 38639065, upload-time = "2025-04-08T19:49:41.957Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/85/284c30508fc3627c6adc855207fc970cb41c894acbbb3e6351f4874ac7c2/ctranslate2-4.6.0-cp311-cp311-win_amd64.whl", hash = "sha256:865649cebae240fe8c5b3e868354ea6c611d2ec17f335848caf890fca6c62d71", size = 19466832, upload-time = "2025-04-08T19:49:44.645Z" },
+]
+
+[[package]]
 name = "cycler"
 version = "0.12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -601,6 +635,23 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ec/3d/c1291319cafec0318899a0e196616745fb7400fa215515a7e0575b871419/fastapi_cloud_cli-0.1.1.tar.gz", hash = "sha256:8014ed3529382e61b88628ecb1904df5fc51256f9090de3cc8acae892dbb7109", size = 20318, upload-time = "2025-07-07T13:46:38.796Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3a/30/051f5ba4b87787c78978fb6c0e81883c59d6da12e20f78eafffba7e0fb7f/fastapi_cloud_cli-0.1.1-py3-none-any.whl", hash = "sha256:56e453f6ddbb2ef23c3e1da43dfc40b406cad680c6cf36832d8ef9422eda5ce8", size = 18937, upload-time = "2025-07-07T13:46:38.011Z" },
+]
+
+[[package]]
+name = "faster-whisper"
+version = "1.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "av" },
+    { name = "ctranslate2" },
+    { name = "huggingface-hub" },
+    { name = "onnxruntime" },
+    { name = "tokenizers" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/be/53/195e5b42ede5f09453828d3b00d52bd952ed0e07a8e5c6497affefcfa3be/faster-whisper-1.1.1.tar.gz", hash = "sha256:50d27571970c1be0c2b2680a2593d5d12f9f5d2f10484f242a1afbe7cb946604", size = 1124684, upload-time = "2025-01-01T14:47:21.712Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ad/69/28359d152f9e2ec1ff4dff3da47011b6346e9a472f89b409bb13017a7d1f/faster_whisper-1.1.1-py3-none-any.whl", hash = "sha256:5808dc334fb64fb4336921450abccfe5e313a859b31ba61def0ac7f639383d90", size = 1118368, upload-time = "2025-01-01T14:47:16.131Z" },
 ]
 
 [[package]]
@@ -1824,6 +1875,25 @@ wheels = [
 ]
 
 [[package]]
+name = "onnxruntime"
+version = "1.22.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "coloredlogs" },
+    { name = "flatbuffers" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "protobuf" },
+    { name = "sympy" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7a/08/c008711d1b92ff1272f4fea0fbee57723171f161d42e5c680625535280af/onnxruntime-1.22.0-cp311-cp311-macosx_13_0_universal2.whl", hash = "sha256:8d6725c5b9a681d8fe72f2960c191a96c256367887d076b08466f52b4e0991df", size = 34282151, upload-time = "2025-05-09T20:25:59.246Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/8b/22989f6b59bc4ad1324f07a945c80b9ab825f0a581ad7a6064b93716d9b7/onnxruntime-1.22.0-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:fef17d665a917866d1f68f09edc98223b9a27e6cb167dec69da4c66484ad12fd", size = 14446302, upload-time = "2025-05-09T20:25:44.299Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/d5/aa83d084d05bc8f6cf8b74b499c77431ffd6b7075c761ec48ec0c161a47f/onnxruntime-1.22.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b978aa63a9a22095479c38371a9b359d4c15173cbb164eaad5f2cd27d666aa65", size = 16393496, upload-time = "2025-05-09T20:26:11.588Z" },
+    { url = "https://files.pythonhosted.org/packages/89/a5/1c6c10322201566015183b52ef011dfa932f5dd1b278de8d75c3b948411d/onnxruntime-1.22.0-cp311-cp311-win_amd64.whl", hash = "sha256:03d3ef7fb11adf154149d6e767e21057e0e577b947dd3f66190b212528e1db31", size = 12691517, upload-time = "2025-05-12T21:26:13.354Z" },
+]
+
+[[package]]
 name = "onnxruntime-silicon"
 version = "1.16.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2678,11 +2748,13 @@ dependencies = [
     { name = "black" },
     { name = "datasets" },
     { name = "fastapi", extra = ["standard"] },
+    { name = "faster-whisper" },
     { name = "hf-transfer" },
     { name = "insanely-fast-whisper" },
     { name = "librosa" },
     { name = "matplotlib" },
     { name = "notebook" },
+    { name = "numpy" },
     { name = "onnxruntime-silicon" },
     { name = "openai-whisper" },
     { name = "python-levenshtein" },
@@ -2702,11 +2774,13 @@ requires-dist = [
     { name = "black", specifier = ">=25.1.0" },
     { name = "datasets", specifier = ">=3.6.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.116.0" },
+    { name = "faster-whisper", specifier = ">=1.1.1" },
     { name = "hf-transfer", specifier = ">=0.1.9" },
     { name = "insanely-fast-whisper", specifier = ">=0.0.15" },
     { name = "librosa", specifier = ">=0.11.0" },
     { name = "matplotlib", specifier = ">=3.10.3" },
     { name = "notebook", specifier = ">=7.4.3" },
+    { name = "numpy", specifier = ">=2.2.6" },
     { name = "onnxruntime-silicon", specifier = ">=1.16.3" },
     { name = "openai-whisper", specifier = ">=20250625" },
     { name = "python-levenshtein", specifier = ">=0.27.1" },

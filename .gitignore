@@ -1,7 +1,10 @@
 data/
 wandb/
 .idea/
+.vite/
+chunks/
 node_modules/
+
 constraints.txt
 *.orig
 *.rej
