@@ -1,8 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
-
 import torch
-from transformers import pipeline, Pipeline
+from transformers import AutoConfig, pipeline, Pipeline
 from transformers.utils import is_flash_attn_2_available
 
 from typing import List, Optional
@@ -46,13 +45,13 @@ app.add_middleware(
 # openai/whisper-base: 74m
 # distil-whisper/distil-small.en: 166m, short-form wer 12.1
 # openai/whisper-small: 244m
-# distil-whisper/distill-medium.en: 394m, 11.1
-# distil-whisper/distill-large-v3: 756m, 9.7
+# distil-whisper/distil-medium.en: 394m, 11.1
+# distil-whisper/distil-large-v3: 756m, 9.7
 # openai/whisper-medium: 769m
 # openai/whisper-large-v3-turbo: 809m
 # openai/whisper-large-v3: 1550m, 8.4
 
-MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "openai/whisper-base")
+MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "openai/whisper-medium.en")
 DEVICE_PREFERENCE = os.getenv("WHISPER_DEVICE", "mps")  # "cuda:0", "mps", or "cpu"
 
 asr_pipe: Optional[Pipeline] = None
@@ -79,6 +78,34 @@ def _load_model() -> None:
         else {"attn_implementation": "sdpa"}
     )
 
+    config = AutoConfig.from_pretrained(MODEL_NAME)
+    # Set alignment_heads for specific models
+    if "medium.en" in MODEL_NAME:
+        # alignment heads for medium.en
+        config.alignment_heads = [
+            [11, 4],
+            [14, 1],
+            [14, 12],
+            [14, 14],
+            [15, 4],
+            [16, 0],
+            [16, 4],
+            [16, 9],
+            [17, 12],
+            [17, 14],
+            [18, 7],
+            [18, 10],
+            [18, 15],
+            [20, 0],
+            [20, 3],
+            [20, 9],
+            [20, 14],
+            [21, 12],
+        ]
+    elif not getattr(config, "alignment_heads", None):
+        # default fallback
+        config.alignment_heads = [[0, 0]]
+
     asr_pipe = pipeline(
         task="automatic-speech-recognition",
         model=MODEL_NAME,
@@ -87,6 +114,7 @@ def _load_model() -> None:
         model_kwargs=attn_impl,
         chunk_length_s=ROLLING_WINDOW_SEC,
         return_timestamps="word",
+        config=config,
     )
 
     Path("chunks").mkdir(exist_ok=True)
@@ -115,10 +143,13 @@ class FeedbackRequest(BaseModel):
 
 SAMPLE_RATE = 16_000
 ROLLING_WINDOW_SEC = 30
-SEND_INTERVAL_SEC = 5
+
+# Initial exponential send intervals (seconds): then full window
+INITIAL_SEND_INTERVALS = [2, 5, 10, 20, ROLLING_WINDOW_SEC]
+# After initial intervals, slide window
+SLIDE_INTERVAL_SEC = ROLLING_WINDOW_SEC / 3
 
 rolling_window_samples = ROLLING_WINDOW_SEC * SAMPLE_RATE
-send_interval_samples = SEND_INTERVAL_SEC * SAMPLE_RATE
 
 
 @app.websocket("/ws")
@@ -141,8 +172,12 @@ async def websocket_pcm(websocket: WebSocket):
 
     ring = np.empty((0,), dtype=np.int16)  # rolling PCM buffer
     received_samples = 0
-    next_emit_samples = send_interval_samples
     chunk_id = 0
+
+    # Emission scheduling state
+    emit_index = 0
+    next_emit_sec = INITIAL_SEND_INTERVALS[emit_index]
+    next_emit_samples = int(next_emit_sec * SAMPLE_RATE)
 
     try:
         while True:
@@ -156,7 +191,7 @@ async def websocket_pcm(websocket: WebSocket):
             ring = np.concatenate((ring, samples))
             received_samples += samples.size
 
-            # Process every 2s
+            # Process every interval
             while received_samples >= next_emit_samples:
                 # Always use the last 30s (or less, if not enough)
                 if ring.size >= rolling_window_samples:
@@ -180,24 +215,19 @@ async def websocket_pcm(websocket: WebSocket):
                     chunks = result.get("chunks", [])
                     tokens = [c["text"] for c in chunks]
                     word_timestamps = [c["timestamp"] for c in chunks]
-                except ValueError as e:
-                    # Catch missing-end-timestamp errors and fall back
-                    if "ending timestamp" in str(e):
-                        logging.warning(
-                            f"Timestamps missing: {e}. Falling back to uniform timing."
-                        )
-                        raw = asr_pipe(rolling_buffer, return_timestamps=False)
-                        text = raw["text"].strip()
-                        tokens = text.split()
-                        # build uniform [start, end] for each token
-                        word_timestamps = []
-                        for i in range(len(tokens)):
-                            s = i * buffer_duration / len(tokens)
-                            t = (i + 1) * buffer_duration / len(tokens)
-                            word_timestamps.append((s, t))
-                    else:
-                        raise
-
+                except (ValueError, IndexError) as e:
+                    logging.warning(
+                        f"Timestamps error ({type(e).__name__}): {e}. Falling back to uniform timing."
+                    )
+                    raw = asr_pipe(rolling_buffer, return_timestamps=False)
+                    text = raw["text"].strip()
+                    tokens = text.split()
+                    # build uniform [start, end] for each token
+                    word_timestamps = []
+                    for i in range(len(tokens)):
+                        s = i * buffer_duration / len(tokens)
+                        t = (i + 1) * buffer_duration / len(tokens)
+                        word_timestamps.append((s, t))
                 # Include tokens and timestamps in the JSON you send back
                 retval = {
                     "chunk_id": chunk_id,
@@ -211,7 +241,17 @@ async def websocket_pcm(websocket: WebSocket):
                 logging.info({"chunk_id": chunk_id, "text": text})
                 await websocket.send_text(json.dumps(retval))
                 chunk_id += 1
-                next_emit_samples += send_interval_samples
+
+                # Advance to next emit threshold
+                emit_index += 1
+                if emit_index < len(INITIAL_SEND_INTERVALS):
+                    next_emit_sec = INITIAL_SEND_INTERVALS[emit_index]
+                else:
+                    # after initial, slide by half-window increments
+                    next_emit_sec = ROLLING_WINDOW_SEC + SLIDE_INTERVAL_SEC * (
+                        emit_index - len(INITIAL_SEND_INTERVALS) + 1
+                    )
+                next_emit_samples = int(next_emit_sec * SAMPLE_RATE)
             if ring.size > rolling_window_samples:
                 ring = ring[-rolling_window_samples:]
 
