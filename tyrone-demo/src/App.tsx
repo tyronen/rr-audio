@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import './App.css';
 
 type Segment = {
-  chunk_id: number;
+  id?: string;
+  chunk_id?: number;
   start_sec: number;
   end_sec: number;
   text: string;
@@ -91,7 +92,8 @@ export default function App() {
         audioCtxRef.current = null;
       }
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.close(1000, "done");
+        // send stop signal
+        wsRef.current.send(new ArrayBuffer(0));
       }
       workletNodeRef.current = null;
     };
@@ -121,7 +123,7 @@ export default function App() {
 
       <div className="transcript" ref={transcriptRef}>
         {segments.map((c) => (
-          <span key={c.chunk_id}>{c.text}</span>
+          <span key={c.id}>{c.text}</span>
         ))}
       </div>
     </div>

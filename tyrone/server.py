@@ -11,7 +11,6 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import json
 import numpy as np  # pip install numpy
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -121,23 +120,6 @@ def _load_model() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Pydantic models
-# ---------------------------------------------------------------------------
-
-
-class TranscribeResponse(BaseModel):
-    chunk_id: int
-    text: str
-    tokens: List[str]
-    word_timestamps: List[float]
-
-
-class FeedbackRequest(BaseModel):
-    chunk_id: int
-    corrected_text: str
-
-
-# ---------------------------------------------------------------------------
 # WebSocket endpoint for raw 16-kHz PCM streaming
 # ---------------------------------------------------------------------------
 
@@ -150,6 +132,60 @@ INITIAL_SEND_INTERVALS = [2, 5, 10, 20, ROLLING_WINDOW_SEC]
 SLIDE_INTERVAL_SEC = ROLLING_WINDOW_SEC / 3
 
 rolling_window_samples = ROLLING_WINDOW_SEC * SAMPLE_RATE
+
+
+def transcribe(buf, chunk_id, received_samples, buffer_duration):
+    global asr_pipe
+    rolling_buffer = buf.astype(np.float32) / 32768.0
+    end_sec = received_samples / SAMPLE_RATE
+    start_sec = max(0.0, end_sec - buffer_duration)
+    logging.info(
+        f"size {rolling_buffer.size} duration {buffer_duration} "
+        f"received_samples {received_samples} end_sec {end_sec} start_sec {start_sec}"
+    )
+    try:
+        result = asr_pipe(rolling_buffer)
+        text = result["text"].strip()
+        chunks = result.get("chunks", [])
+        tokens = [c["text"] for c in chunks]
+        word_timestamps = [c["timestamp"] for c in chunks]
+    except (ValueError, IndexError) as e:
+        logging.warning(
+            f"Timestamps error ({type(e).__name__}): {e}. Falling back to uniform timing."
+        )
+        raw = asr_pipe(rolling_buffer, return_timestamps=False)
+        text = raw["text"].strip()
+        tokens = text.split()
+        # build uniform [start, end] for each token
+        word_timestamps = []
+        for i in range(len(tokens)):
+            s = i * buffer_duration / len(tokens)
+            t = (i + 1) * buffer_duration / len(tokens)
+            word_timestamps.append((s, t))
+    # Include tokens and timestamps in the JSON you send back
+    return {
+        "chunk_id": chunk_id,
+        "text": text,
+        "tokens": tokens,
+        "word_timestamps": word_timestamps,
+        "start_sec": start_sec,
+        "duration": buffer_duration,
+    }
+
+
+def transcribe_window(ring, chunk_id, received_samples):
+    # Always use the last 30s (or less, if not enough)
+    if ring.size >= rolling_window_samples:
+        buf = ring[-rolling_window_samples:]
+        buffer_duration = rolling_window_samples / SAMPLE_RATE
+    else:
+        buf = ring
+        buffer_duration = ring.size / SAMPLE_RATE
+
+    retval = transcribe(buf, chunk_id, received_samples, buffer_duration)
+
+    logging.info({"chunk_id": chunk_id, "text": retval["text"]})
+    return retval
 
 
 @app.websocket("/ws")
@@ -180,94 +216,54 @@ async def websocket_pcm(websocket: WebSocket):
     next_emit_samples = int(next_emit_sec * SAMPLE_RATE)
 
     try:
+        stream_ended = False
         while True:
             # Receive raw PCM bytes
             frame = await websocket.receive_bytes()
-            samples = np.frombuffer(frame, dtype=np.int16)
-            if samples.size == 0:
-                continue
+            if len(frame) == 0:
+                stream_ended = True
+                # fall through to flush logic below
+            else:
+                samples = np.frombuffer(frame, dtype=np.int16)
+                # Append to ring-buffer
+                ring = np.concatenate((ring, samples))
+                received_samples += samples.size
+                # Process every interval
+                while received_samples >= next_emit_samples:
+                    retval = transcribe_window(ring, chunk_id, received_samples)
+                    await websocket.send_text(json.dumps(retval))
+                    chunk_id += 1
 
-            # Append to ring-buffer
-            ring = np.concatenate((ring, samples))
-            received_samples += samples.size
+                    # Advance to next emit threshold
+                    emit_index += 1
+                    if emit_index < len(INITIAL_SEND_INTERVALS):
+                        next_emit_sec = INITIAL_SEND_INTERVALS[emit_index]
+                    else:
+                        # after initial, slide by half-window increments
+                        next_emit_sec = ROLLING_WINDOW_SEC + SLIDE_INTERVAL_SEC * (
+                            emit_index - len(INITIAL_SEND_INTERVALS) + 1
+                        )
+                    next_emit_samples = int(next_emit_sec * SAMPLE_RATE)
 
-            # Process every interval
-            while received_samples >= next_emit_samples:
-                # Always use the last 30s (or less, if not enough)
-                if ring.size >= rolling_window_samples:
-                    buf = ring[-rolling_window_samples:]
-                    buffer_duration = rolling_window_samples / SAMPLE_RATE
-                else:
-                    buf = ring
-                    buffer_duration = ring.size / SAMPLE_RATE
-
-                rolling_buffer = buf.astype(np.float32) / 32768.0
-                end_sec = received_samples / SAMPLE_RATE
-                start_sec = max(0.0, end_sec - buffer_duration)
-                logging.info(
-                    f"size {rolling_buffer.size} duration {buffer_duration} "
-                    f"received_samples {received_samples} end_sec {end_sec} start_sec {start_sec}"
-                )
-
-                try:
-                    result = asr_pipe(rolling_buffer)
-                    text = result["text"].strip()
-                    chunks = result.get("chunks", [])
-                    tokens = [c["text"] for c in chunks]
-                    word_timestamps = [c["timestamp"] for c in chunks]
-                except (ValueError, IndexError) as e:
-                    logging.warning(
-                        f"Timestamps error ({type(e).__name__}): {e}. Falling back to uniform timing."
-                    )
-                    raw = asr_pipe(rolling_buffer, return_timestamps=False)
-                    text = raw["text"].strip()
-                    tokens = text.split()
-                    # build uniform [start, end] for each token
-                    word_timestamps = []
-                    for i in range(len(tokens)):
-                        s = i * buffer_duration / len(tokens)
-                        t = (i + 1) * buffer_duration / len(tokens)
-                        word_timestamps.append((s, t))
-                # Include tokens and timestamps in the JSON you send back
-                retval = {
-                    "chunk_id": chunk_id,
-                    "text": text,
-                    "tokens": tokens,
-                    "word_timestamps": word_timestamps,
-                    "start_sec": start_sec,
-                    "duration": buffer_duration,
-                }
-
-                logging.info({"chunk_id": chunk_id, "text": text})
-                await websocket.send_text(json.dumps(retval))
-                chunk_id += 1
-
-                # Advance to next emit threshold
-                emit_index += 1
-                if emit_index < len(INITIAL_SEND_INTERVALS):
-                    next_emit_sec = INITIAL_SEND_INTERVALS[emit_index]
-                else:
-                    # after initial, slide by half-window increments
-                    next_emit_sec = ROLLING_WINDOW_SEC + SLIDE_INTERVAL_SEC * (
-                        emit_index - len(INITIAL_SEND_INTERVALS) + 1
-                    )
-                next_emit_samples = int(next_emit_sec * SAMPLE_RATE)
             if ring.size > rolling_window_samples:
                 ring = ring[-rolling_window_samples:]
+            if stream_ended and ring.size > 0:
+                # do one final pass on whatever is left
+                buf = ring
+                buffer_duration = buf.size / SAMPLE_RATE
+
+                retval = transcribe(buf, chunk_id, received_samples, buffer_duration)
+                await websocket.send_text(json.dumps(retval))
+                # clear the ring so we don’t send again
+                ring = np.empty((0,), dtype=np.int16)
+
+            # Finally, once client stopped *and* ring is empty *and*
+            # we’re not going to emit any more intervals, break and close
+            if stream_ended and ring.size == 0 and received_samples < next_emit_samples:
+                await websocket.close(code=1000, reason="flushed")
+                return
 
     except WebSocketDisconnect as e:
         logging.error(f"WebSocket disconnected: {e}")
         # Client hung up – just exit the coroutine
         return
-
-
-@app.post("/feedback")
-async def feedback(data: FeedbackRequest):
-    """
-    Receives user‑corrected transcription for a previously processed chunk.
-
-    TODO:
-      • Store `data.corrected_text` next to the original chunk
-      • Diff original vs corrected and append to adaptation queue.
-    """
-    return {"status": "received", "chunk_id": data.chunk_id}
