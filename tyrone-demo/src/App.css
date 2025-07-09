@@ -1,10 +1,8 @@
 /* Layout */
-#root {
+.app {
   max-width: 900px;
   margin: 0 auto;
   padding: 2rem;
-  text-align: center;
-  font-family: system-ui, sans-serif;
 }
 
 /* Control buttons */
@@ -24,7 +22,8 @@
   padding: 1rem;
   text-align: left;
   background: #111;
-  color: #eee;
+  color: #fff;
   white-space: pre-wrap;
-  font-family: monospace;
+  font-family: 'Courier Prime', 'SF Mono', Monaco, monospace;
+  font-size: large;
 }

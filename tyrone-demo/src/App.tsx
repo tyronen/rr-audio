@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
+import './App.css';
 
-type Chunk = {
-  id: number;
+type Segment = {
+  startSec: number;
+  endSec: number;
   text: string;
 };
 
 export default function App() {
   const [isRecording, setIsRecording] = useState(false);
-  const [chunks, setChunks] = useState<Chunk[]>([]);
+  const [segments, setSegments] = useState<Segment[]>([]);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -16,7 +18,7 @@ export default function App() {
   useEffect(() => {
     if (!isRecording) return;
 
-    setChunks([]);
+    setSegments([]);
 
     async function startRecording() {
       // Open or reuse WebSocket
@@ -24,8 +26,12 @@ export default function App() {
         wsRef.current = new WebSocket("ws://localhost:8000/ws");
         wsRef.current.onmessage = (e) => {
           try {
-            const { chunk_id, text } = JSON.parse(e.data);
-            setChunks((prev) => [...prev, { id: chunk_id, text }]);
+            const { text, start_sec, duration  } = JSON.parse(e.data);
+            const endSec = start_sec + duration;
+            setSegments((prev) => {
+              const filtered = prev.filter((seg) => seg.endSec <= start_sec || seg.startSec >= endSec);
+              return [...filtered, { startSec: start_sec, endSec, text }].sort((a, b) => a.startSec - b.startSec);
+            });
           } catch (err) {
             console.error("bad ws message", err);
           }
@@ -79,10 +85,10 @@ export default function App() {
       top: el.scrollHeight,
       behavior: 'smooth',
     });
-  }, [chunks]);
+  }, [segments]);
 
   return (
-    <div id="root">
+    <div className="app">
       <h1>Voice Transcriber Demo</h1>
 
       <div className="controls">
@@ -94,8 +100,8 @@ export default function App() {
       </div>
 
       <div className="transcript" ref={transcriptRef}>
-        {chunks.map((c) => (
-          <span key={c.id}>{c.text} </span>
+        {segments.map((c) => (
+          <span key={c.startSec}>{c.text} </span>
         ))}
       </div>
     </div>

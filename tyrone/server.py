@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 import torch
@@ -17,10 +18,12 @@ from pydantic import BaseModel
 import json
 import numpy as np  # pip install numpy
 from starlette.websockets import WebSocket, WebSocketDisconnect
+import utils
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    utils.setup_logging()
     _load_model()
     yield
 
@@ -39,7 +42,7 @@ app.add_middleware(
 # Whisper model (loaded once at startup)
 # ---------------------------------------------------------------------------
 
-MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "distil-whisper/distil-small.en")
+MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "openai/whisper-small")
 DEVICE_PREFERENCE = os.getenv("WHISPER_DEVICE", "mps")  # "cuda:0", "mps", or "cpu"
 
 asr_pipe: Optional[Pipeline] = None
@@ -95,113 +98,15 @@ class FeedbackRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# End‑points
-# ---------------------------------------------------------------------------
-
-
-@app.post("/transcribe", response_model=TranscribeResponse)
-async def transcribe(
-    chunk_id: int = Form(...),
-    audio: UploadFile = File(...),
-) -> TranscribeResponse:
-    """
-    Accepts a 30‑second WebM/Opus audio chunk plus its numeric `chunk_id`
-    from the front‑end.  Saves the file and kicks off ASR (to be implemented).
-
-    TODO:
-      • Write the uploaded audio to `./chunks/{chunk_id}.webm`
-      • Run insanely-faster-whisper and fill `text`, `tokens`,
-        `word_timestamps`.
-    """
-    # -----------------------------------------------------------------------
-    # 1.  Persist the uploaded blob to disk
-    # -----------------------------------------------------------------------
-    chunk_dir = Path("chunks")
-    chunk_dir.mkdir(exist_ok=True)
-
-    payload = await audio.read()
-
-    # Skip blobs that are obviously too small (<4 kB) – they have no header.
-    if len(payload) < 4_096:
-        raise HTTPException(status_code=400, detail="Empty or too‑small audio blob")
-
-    mime = (audio.content_type or "").lower()
-    ext = ".ogg" if "ogg" in mime else ".webm"
-
-    chunk_path = chunk_dir / f"{chunk_id}{ext}"
-    with chunk_path.open("wb") as f:
-        f.write(payload)
-
-    # Convert WebM/Opus ➜ 16‑kHz mono WAV (Whisper default)
-    wav_path = chunk_path.with_suffix(".wav")
-    proc = subprocess.run(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",  # overwrite
-            "-probesize",
-            "1M",
-            "-analyzeduration",
-            "1M",
-            "-i",
-            str(chunk_path),
-            "-acodec",
-            "pcm_s16le",
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            str(wav_path),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        err_msg = proc.stderr.strip() or "Unknown ffmpeg failure"
-        print(f"[ffmpeg] {err_msg}")  # log to server console
-        raise HTTPException(
-            status_code=400,
-            detail=f"FFmpeg failed: {err_msg}",
-        )
-
-    # -----------------------------------------------------------------------
-    # 2.  Run Whisper inference in a worker thread (sync function off‑loaded)
-    # -----------------------------------------------------------------------
-    def _do_transcribe_sync() -> TranscribeResponse:
-        global asr_pipe
-        if asr_pipe is None:
-            raise RuntimeError("ASR pipeline not initialised")
-
-        result = asr_pipe(
-            str(wav_path),
-            chunk_length_s=10,
-            batch_size=1,
-            return_timestamps=True,
-        )
-
-        tokens: list[str] = []
-        word_ts: list[float] = []
-
-        for ch in result.get("chunks", []):
-            tokens.append(ch["text"])
-            if ch["timestamp"] is not None:
-                word_ts.append(ch["timestamp"][0])
-
-        return TranscribeResponse(
-            chunk_id=chunk_id,
-            text=result["text"].strip(),
-            tokens=tokens,
-            word_timestamps=word_ts,
-        )
-
-    return await asyncio.to_thread(_do_transcribe_sync)
-
-
-# ---------------------------------------------------------------------------
 # WebSocket endpoint for raw 16-kHz PCM streaming
 # ---------------------------------------------------------------------------
+
+SAMPLE_RATE = 16_000
+ROLLING_WINDOW_SEC = 30
+SEND_INTERVAL_SEC = 2
+
+rolling_window_samples = ROLLING_WINDOW_SEC * SAMPLE_RATE
+send_interval_samples = SEND_INTERVAL_SEC * SAMPLE_RATE
 
 
 @app.websocket("/ws")
@@ -222,8 +127,9 @@ async def websocket_pcm(websocket: WebSocket):
         await websocket.close(code=1011, reason="ASR model not ready")
         return
 
-    WINDOW = 32_000  # 2 s × 16 kHz = 32 000 samples
     ring = np.empty((0,), dtype=np.int16)  # rolling PCM buffer
+    received_samples = 0
+    next_emit_samples = send_interval_samples
     chunk_id = 0
 
     try:
@@ -236,24 +142,46 @@ async def websocket_pcm(websocket: WebSocket):
 
             # Append to ring-buffer
             ring = np.concatenate((ring, samples))
+            received_samples += samples.size
 
-            # ßProcess every full 2-second window
-            while ring.size >= WINDOW:
-                window = ring[:WINDOW].astype(np.float32) / 32768.0  # [-1, 1]
-                ring = ring[WINDOW:]  # pop
+            # Process every 2s
+            while received_samples >= next_emit_samples:
+                # Always use the last 30s (or less, if not enough)
+                if ring.size >= rolling_window_samples:
+                    buf = ring[-rolling_window_samples:]
+                    buffer_duration = rolling_window_samples / SAMPLE_RATE
+                else:
+                    buf = ring
+                    buffer_duration = ring.size / SAMPLE_RATE
+
+                rolling_buffer = buf.astype(np.float32) / 32768.0
+                end_sec = received_samples / SAMPLE_RATE
+                start_sec = max(0.0, end_sec - buffer_duration)
+                logging.info(
+                    f"size {rolling_buffer.size} duration {buffer_duration} "
+                    f"received_samples {received_samples} end_sec {end_sec} start_sec {start_sec}"
+                )
 
                 result = asr_pipe(
-                    window,
+                    rolling_buffer,
                     return_timestamps=False,
                 )
                 text = result["text"].strip()
 
-                await websocket.send_text(
-                    json.dumps({"chunk_id": chunk_id, "text": text})
-                )
+                retval = {
+                    "chunk_id": chunk_id,
+                    "text": text,
+                    "start_sec": start_sec,
+                    "duration": buffer_duration,
+                }
+                logging.info(retval)
+                await websocket.send_text(json.dumps(retval))
                 chunk_id += 1
+                next_emit_samples += send_interval_samples
+            if ring.size > rolling_window_samples:
+                ring = ring[-rolling_window_samples:]
 
-    except WebSocketDisconnect:
+    except Exception:
         # Client hung up – just exit the coroutine
         return
 
