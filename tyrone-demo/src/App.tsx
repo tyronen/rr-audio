@@ -2,10 +2,17 @@ import { useEffect, useRef, useState } from 'react';
 import './App.css';
 
 type Segment = {
-  startSec: number;
-  endSec: number;
+  chunk_id: number;
+  start_sec: number;
+  end_sec: number;
   text: string;
 };
+
+const logSegments = (intro: string, segments: Segment[]) => {
+  const texts = segments.map((seg) => seg.text);
+  console.log(intro, texts.join(" "));
+}
+
 
 export default function App() {
   const [isRecording, setIsRecording] = useState(false);
@@ -26,11 +33,24 @@ export default function App() {
         wsRef.current = new WebSocket("ws://localhost:8000/ws");
         wsRef.current.onmessage = (e) => {
           try {
-            const { text, start_sec, duration  } = JSON.parse(e.data);
-            const endSec = start_sec + duration;
+            const { chunk_id, tokens, word_timestamps, start_sec, duration  } = JSON.parse(e.data);
+            const end_sec = start_sec + duration;
+            const wordSegments: Segment[] = tokens.map((tok: string, i: number) => {
+              const [wStart, wEnd] = word_timestamps[i];
+              return {
+                id: `${chunk_id}-${i}`,
+                start_sec: start_sec + wStart,
+                end_sec:   start_sec + wEnd,
+                text:     tok,
+              };
+            });
             setSegments((prev) => {
-              const filtered = prev.filter((seg) => seg.endSec <= start_sec || seg.startSec >= endSec);
-              return [...filtered, { startSec: start_sec, endSec, text }].sort((a, b) => a.startSec - b.startSec);
+              logSegments("Before change", prev);
+              const filtered = prev.filter((seg) => seg.end_sec <= start_sec || seg.start_sec >= end_sec);
+              const newSegs =  [...filtered, ...wordSegments]
+                  .sort((a, b) => a.start_sec - b.start_sec);
+              logSegments("After change", newSegs);
+              return newSegs;
             });
           } catch (err) {
             console.error("bad ws message", err);
@@ -101,7 +121,7 @@ export default function App() {
 
       <div className="transcript" ref={transcriptRef}>
         {segments.map((c) => (
-          <span key={c.startSec}>{c.text} </span>
+          <span key={c.chunk_id}>{c.text}</span>
         ))}
       </div>
     </div>

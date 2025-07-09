@@ -7,12 +7,10 @@ from transformers.utils import is_flash_attn_2_available
 
 from typing import List, Optional
 
-import asyncio
 import os
-import subprocess
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
@@ -42,7 +40,19 @@ app.add_middleware(
 # Whisper model (loaded once at startup)
 # ---------------------------------------------------------------------------
 
-MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "openai/whisper-small")
+
+# Model guide:
+# openai/whisper-tiny: 39m
+# openai/whisper-base: 74m
+# distil-whisper/distil-small.en: 166m, short-form wer 12.1
+# openai/whisper-small: 244m
+# distil-whisper/distill-medium.en: 394m, 11.1
+# distil-whisper/distill-large-v3: 756m, 9.7
+# openai/whisper-medium: 769m
+# openai/whisper-large-v3-turbo: 809m
+# openai/whisper-large-v3: 1550m, 8.4
+
+MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "openai/whisper-base")
 DEVICE_PREFERENCE = os.getenv("WHISPER_DEVICE", "mps")  # "cuda:0", "mps", or "cpu"
 
 asr_pipe: Optional[Pipeline] = None
@@ -75,6 +85,8 @@ def _load_model() -> None:
         torch_dtype=torch.float16 if device_str != "cpu" else torch.float32,
         device=device_str,
         model_kwargs=attn_impl,
+        chunk_length_s=ROLLING_WINDOW_SEC,
+        return_timestamps="word",
     )
 
     Path("chunks").mkdir(exist_ok=True)
@@ -103,7 +115,7 @@ class FeedbackRequest(BaseModel):
 
 SAMPLE_RATE = 16_000
 ROLLING_WINDOW_SEC = 30
-SEND_INTERVAL_SEC = 2
+SEND_INTERVAL_SEC = 5
 
 rolling_window_samples = ROLLING_WINDOW_SEC * SAMPLE_RATE
 send_interval_samples = SEND_INTERVAL_SEC * SAMPLE_RATE
@@ -162,26 +174,49 @@ async def websocket_pcm(websocket: WebSocket):
                     f"received_samples {received_samples} end_sec {end_sec} start_sec {start_sec}"
                 )
 
-                result = asr_pipe(
-                    rolling_buffer,
-                    return_timestamps=False,
-                )
-                text = result["text"].strip()
+                try:
+                    result = asr_pipe(rolling_buffer)
+                    text = result["text"].strip()
+                    chunks = result.get("chunks", [])
+                    tokens = [c["text"] for c in chunks]
+                    word_timestamps = [c["timestamp"] for c in chunks]
+                except ValueError as e:
+                    # Catch missing-end-timestamp errors and fall back
+                    if "ending timestamp" in str(e):
+                        logging.warning(
+                            f"Timestamps missing: {e}. Falling back to uniform timing."
+                        )
+                        raw = asr_pipe(rolling_buffer, return_timestamps=False)
+                        text = raw["text"].strip()
+                        tokens = text.split()
+                        # build uniform [start, end] for each token
+                        word_timestamps = []
+                        for i in range(len(tokens)):
+                            s = i * buffer_duration / len(tokens)
+                            t = (i + 1) * buffer_duration / len(tokens)
+                            word_timestamps.append((s, t))
+                    else:
+                        raise
 
+                # Include tokens and timestamps in the JSON you send back
                 retval = {
                     "chunk_id": chunk_id,
                     "text": text,
+                    "tokens": tokens,
+                    "word_timestamps": word_timestamps,
                     "start_sec": start_sec,
                     "duration": buffer_duration,
                 }
-                logging.info(retval)
+
+                logging.info({"chunk_id": chunk_id, "text": text})
                 await websocket.send_text(json.dumps(retval))
                 chunk_id += 1
                 next_emit_samples += send_interval_samples
             if ring.size > rolling_window_samples:
                 ring = ring[-rolling_window_samples:]
 
-    except Exception:
+    except WebSocketDisconnect as e:
+        logging.error(f"WebSocket disconnected: {e}")
         # Client hung up – just exit the coroutine
         return
 
