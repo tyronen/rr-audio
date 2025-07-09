@@ -135,11 +135,16 @@ def _load_model() -> None:
         device=device_str,
         model_kwargs=attn_impl,
         chunk_length_s=ROLLING_WINDOW_SEC,
+        stride_length_s=SLIDE_INTERVAL_SEC,
         return_timestamps="word",
         config=config,
         feature_extractor=processor.feature_extractor,
         tokenizer=processor.tokenizer,
-        generate_kwargs={"logits_processor": [ts_processor]},
+        generate_kwargs={
+            "logits_processor": [ts_processor],
+            "num_beams": 4,
+            "no_repeat_ngram_size": 3,
+        },
     )
 
     Path("chunks").mkdir(exist_ok=True)
