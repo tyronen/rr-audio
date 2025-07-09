@@ -1,7 +1,14 @@
 import logging
 from contextlib import asynccontextmanager
 import torch
-from transformers import AutoConfig, pipeline, Pipeline
+from transformers import (
+    AutoConfig,
+    pipeline,
+    Pipeline,
+    WhisperForConditionalGeneration,
+    WhisperProcessor,
+    WhisperTimeStampLogitsProcessor,
+)
 from transformers.utils import is_flash_attn_2_available
 
 from typing import List, Optional
@@ -105,6 +112,22 @@ def _load_model() -> None:
         # default fallback
         config.alignment_heads = [[0, 0]]
 
+    # 1. Load your model object (so you can grab its generation_config)
+    model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME)
+
+    # 2. Load your processor as before
+    processor = WhisperProcessor.from_pretrained(MODEL_NAME)
+
+    # 3. Compute the “begin_index” as the number of forced_decoder_ids the model is already using:
+    begin_index = len(model.generation_config.forced_decoder_ids or [])
+
+    # 4. Instantiate the logits‐processor with the model’s GenerationConfig and that index:
+    ts_processor = WhisperTimeStampLogitsProcessor(
+        model.generation_config,
+        begin_index,
+        _detect_timestamp_from_logprob=True,  # you can omit or set False if you like
+    )
+
     asr_pipe = pipeline(
         task="automatic-speech-recognition",
         model=MODEL_NAME,
@@ -114,6 +137,9 @@ def _load_model() -> None:
         chunk_length_s=ROLLING_WINDOW_SEC,
         return_timestamps="word",
         config=config,
+        feature_extractor=processor.feature_extractor,
+        tokenizer=processor.tokenizer,
+        generate_kwargs={"logits_processor": [ts_processor]},
     )
 
     Path("chunks").mkdir(exist_ok=True)
@@ -136,33 +162,38 @@ rolling_window_samples = ROLLING_WINDOW_SEC * SAMPLE_RATE
 
 def transcribe(buf, chunk_id, received_samples, buffer_duration):
     global asr_pipe
+    silence = np.zeros(int(0.25 * SAMPLE_RATE), dtype=np.int16)
+    buf = np.concatenate((buf, silence))
     rolling_buffer = buf.astype(np.float32) / 32768.0
     end_sec = received_samples / SAMPLE_RATE
     start_sec = max(0.0, end_sec - buffer_duration)
-    logging.info(
-        f"size {rolling_buffer.size} duration {buffer_duration} "
-        f"received_samples {received_samples} end_sec {end_sec} start_sec {start_sec}"
-    )
-    try:
-        result = asr_pipe(rolling_buffer)
-        text = result["text"].strip()
-        chunks = result.get("chunks", [])
-        tokens = [c["text"] for c in chunks]
-        word_timestamps = [c["timestamp"] for c in chunks]
-    except (ValueError, IndexError) as e:
+    result = asr_pipe(rolling_buffer)
+    text = result["text"].strip()
+    chunks = result.get("chunks", [])
+    tokens = [c["text"] for c in chunks]
+    word_timestamps = [c["timestamp"] for c in chunks]
+    # Detect incomplete timestamps and fall back if needed
+    if any(len(ts) != 2 for ts in word_timestamps):
         logging.warning(
-            f"Timestamps error ({type(e).__name__}): {e}. Falling back to uniform timing."
+            "Incomplete timestamp detected; falling back to uniform timing."
         )
         raw = asr_pipe(rolling_buffer, return_timestamps=False)
         text = raw["text"].strip()
         tokens = text.split()
-        # build uniform [start, end] for each token
         word_timestamps = []
         for i in range(len(tokens)):
             s = i * buffer_duration / len(tokens)
             t = (i + 1) * buffer_duration / len(tokens)
             word_timestamps.append((s, t))
     # Include tokens and timestamps in the JSON you send back
+    logging.info(
+        {
+            "start_sec": start_sec,
+            "end_sec": end_sec,
+            "chunk_id": chunk_id,
+            "text": text,
+        }
+    )
     return {
         "chunk_id": chunk_id,
         "text": text,
@@ -182,10 +213,7 @@ def transcribe_window(ring, chunk_id, received_samples):
         buf = ring
         buffer_duration = ring.size / SAMPLE_RATE
 
-    retval = transcribe(buf, chunk_id, received_samples, buffer_duration)
-
-    logging.info({"chunk_id": chunk_id, "text": retval["text"]})
-    return retval
+    return transcribe(buf, chunk_id, received_samples, buffer_duration)
 
 
 @app.websocket("/ws")
