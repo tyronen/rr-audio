@@ -11,23 +11,24 @@ from transformers import (
 )
 from transformers.utils import is_flash_attn_2_available
 
-from typing import List, Optional
+from typing import Optional
 
 import os
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import json
-import numpy as np  # pip install numpy
+import numpy as np
 from starlette.websockets import WebSocket, WebSocketDisconnect
 import utils
+from faster_whisper import WhisperModel
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     utils.setup_logging()
-    _load_model()
+    _load_pipeline()
     yield
 
 
@@ -57,13 +58,14 @@ app.add_middleware(
 # openai/whisper-large-v3-turbo: 809m
 # openai/whisper-large-v3: 1550m, 8.4
 
-MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "openai/whisper-medium.en")
-DEVICE_PREFERENCE = os.getenv("WHISPER_DEVICE", "mps")  # "cuda:0", "mps", or "cpu"
+MODEL_NAME = os.getenv("WHISPER_MODEL_NAME", "openai/whisper-tiny")
+DEVICE_PREFERENCE = utils.get_device().type
 
 asr_pipe: Optional[Pipeline] = None
+asr_model: Optional[WhisperModel] = None
 
 
-def _load_model() -> None:
+def _load_pipeline() -> None:
     """
     Load the insanely‑fast‑whisper checkpoint via Hugging Face Transformers.
     Uses Flash‑Attention‑2 if available, otherwise SDPA attention.
@@ -86,7 +88,18 @@ def _load_model() -> None:
 
     config = AutoConfig.from_pretrained(MODEL_NAME)
     # Set alignment_heads for specific models
-    if "medium.en" in MODEL_NAME:
+    if "openai/whisper-tiny.en" in MODEL_NAME:
+        config.alignment_heads = [
+            [1, 0],
+            [2, 0],
+            [2, 5],
+            [3, 0],
+            [3, 1],
+            [3, 2],
+            [3, 3],
+            [3, 4],
+        ]
+    elif "openai/whisper-medium.en" in MODEL_NAME:
         # alignment heads for medium.en
         config.alignment_heads = [
             [11, 4],
@@ -108,9 +121,6 @@ def _load_model() -> None:
             [20, 14],
             [21, 12],
         ]
-    elif not getattr(config, "alignment_heads", None):
-        # default fallback
-        config.alignment_heads = [[0, 0]]
 
     # 1. Load your model object (so you can grab its generation_config)
     model = WhisperForConditionalGeneration.from_pretrained(MODEL_NAME)
@@ -131,13 +141,14 @@ def _load_model() -> None:
     asr_pipe = pipeline(
         task="automatic-speech-recognition",
         model=MODEL_NAME,
-        torch_dtype=torch.float16 if device_str != "cpu" else torch.float32,
+        torch_dtype=torch.float16 if device_str == "cuda" else torch.float32,
         device=device_str,
         model_kwargs=attn_impl,
         chunk_length_s=ROLLING_WINDOW_SEC,
         stride_length_s=SLIDE_INTERVAL_SEC,
         return_timestamps="word",
         config=config,
+        processor=processor,
         feature_extractor=processor.feature_extractor,
         tokenizer=processor.tokenizer,
         generate_kwargs={
@@ -148,6 +159,30 @@ def _load_model() -> None:
     )
 
     Path("chunks").mkdir(exist_ok=True)
+
+
+def _load_model() -> None:
+    global asr_model
+
+    if DEVICE_PREFERENCE.startswith("cuda"):
+        device = "cuda"
+        compute_type = "float16"
+    elif DEVICE_PREFERENCE == "mps":
+        device = "cpu"  # Apple Silicon: use CPU for now; float32 is default
+        compute_type = "int8"  # Or "float32" if int8 fails
+    else:
+        device = "cpu"
+        compute_type = "int8"
+
+    model_name = MODEL_NAME.replace("openai/whisper-", "").replace(
+        "distil-whisper/", ""
+    )
+
+    asr_model = WhisperModel(
+        model_name,
+        device=device,
+        compute_type=compute_type,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -165,13 +200,8 @@ SLIDE_INTERVAL_SEC = ROLLING_WINDOW_SEC / 3
 rolling_window_samples = ROLLING_WINDOW_SEC * SAMPLE_RATE
 
 
-def transcribe(buf, chunk_id, received_samples, buffer_duration):
+def transcribe_pipeline(rolling_buffer, buffer_duration):
     global asr_pipe
-    silence = np.zeros(int(0.25 * SAMPLE_RATE), dtype=np.int16)
-    buf = np.concatenate((buf, silence))
-    rolling_buffer = buf.astype(np.float32) / 32768.0
-    end_sec = received_samples / SAMPLE_RATE
-    start_sec = max(0.0, end_sec - buffer_duration)
     result = asr_pipe(rolling_buffer)
     text = result["text"].strip()
     chunks = result.get("chunks", [])
@@ -190,6 +220,47 @@ def transcribe(buf, chunk_id, received_samples, buffer_duration):
             s = i * buffer_duration / len(tokens)
             t = (i + 1) * buffer_duration / len(tokens)
             word_timestamps.append((s, t))
+    return text, tokens, word_timestamps
+
+
+def transcribe_model(rolling_buffer):
+    segments, info = asr_model.transcribe(
+        rolling_buffer,
+        language="en",
+        beam_size=4,
+        word_timestamps=True,
+        vad_filter=True,  # Optionally add VAD
+    )
+
+    tokens = []
+    word_timestamps = []
+    text = ""
+    for segment in segments:
+        text += segment.text
+        for word in segment.words:
+            tokens.append(word.word)
+            word_timestamps.append((word.start, word.end))
+    text = text.strip()
+    return text, tokens, word_timestamps
+
+
+def transcribe(buf, chunk_id, received_samples, buffer_duration):
+    global asr_pipe, asr_model
+    silence = np.zeros(int(0.25 * SAMPLE_RATE), dtype=np.int16)
+    buf = np.concatenate((buf, silence))
+    rolling_buffer = buf.astype(np.float32) / 32768.0
+    end_sec = received_samples / SAMPLE_RATE
+    start_sec = max(0.0, end_sec - buffer_duration)
+
+    if asr_model:
+        text, tokens, word_timestamps = transcribe_model(rolling_buffer)
+    elif asr_pipe:
+        text, tokens, word_timestamps = transcribe_pipeline(
+            rolling_buffer, buffer_duration
+        )
+    else:
+        raise Exception("Neither pipeline nor model configured")
+
     # Include tokens and timestamps in the JSON you send back
     logging.info(
         {
@@ -235,7 +306,7 @@ async def websocket_pcm(websocket: WebSocket):
 
     # Make sure the ASR model is loaded
     global asr_pipe
-    if asr_pipe is None:
+    if asr_pipe is None and asr_model is None:
         await websocket.close(code=1011, reason="ASR model not ready")
         return
 
@@ -300,3 +371,59 @@ async def websocket_pcm(websocket: WebSocket):
         logging.error(f"WebSocket disconnected: {e}")
         # Client hung up – just exit the coroutine
         return
+
+
+@app.post("/train")
+async def train(audio: UploadFile = File(...), transcript: str = Form(...)):
+    """
+    Accepts an audio file and a corrected transcript. Fine-tunes the ASR model on this pair.
+    """
+    global asr_pipe
+
+    # Only support insanely-fast-whisper for now (training requires PyTorch)
+    if asr_pipe is None:
+        raise HTTPException(
+            status_code=503, detail="ASR model is not loaded or not trainable."
+        )
+
+    # Read the raw audio file into numpy
+    audio_bytes = await audio.read()
+    audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+
+    # Prepare the model for training (single step)
+    model = asr_pipe.model
+    processor = asr_pipe.processor
+
+    # Encode audio and target
+    input_features = asr_pipe.feature_extractor(
+        audio_np, sampling_rate=SAMPLE_RATE, return_tensors="pt"
+    ).input_features.to(model.device)
+
+    # Convert dtype if model expects float16 (half precision)
+    if model.dtype == torch.float16:
+        input_features = input_features.half()
+    elif model.dtype == torch.bfloat16:
+        input_features = input_features.bfloat16()
+    else:
+        input_features = input_features.float()
+
+    labels = (
+        processor(text=transcript, return_tensors="pt")
+        .input_ids.to(model.device)
+        .long()
+    )
+
+    # Standard training loop for a single step
+    model.train()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
+
+    outputs = model(input_features=input_features, labels=labels)
+    loss = outputs.loss
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    # Optionally, switch back to eval mode
+    model.eval()
+
+    return {"success": True, "loss": float(loss.detach().cpu().item())}

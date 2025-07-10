@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import './App.css';
 
+
+
 type Segment = {
   id?: string;
   chunk_id?: number;
@@ -21,12 +23,17 @@ export default function App() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const transcriptRef = useRef<HTMLTextAreaElement | null>(null);
+  // Add state at the top:
+  const [recordedPCM, setRecordedPCM] = useState<Int16Array[]>([]);
+  const [editableTranscript, setEditableTranscript] = useState("");
 
   useEffect(() => {
     if (!isRecording) return;
 
     setSegments([]);
+    // Inside startRecording(), when you setSegments([]), also add:
+    setRecordedPCM([]);
 
     async function startRecording() {
       // Open or reuse WebSocket
@@ -79,6 +86,8 @@ export default function App() {
           int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
         }
         ws.send(int16.buffer);
+        // In workletNode.port.onmessage, add after ws.send():
+        setRecordedPCM((prev) => [...prev, int16]);
       };
 
       source.connect(workletNode).connect(ctx.destination);
@@ -98,6 +107,10 @@ export default function App() {
       workletNodeRef.current = null;
     };
   }, [isRecording]);
+
+  useEffect(() => {
+      setEditableTranscript(segments.map((c) => c.text).join(""));
+  }, [segments]);
 
   // Auto‑scroll transcript to the bottom whenever a new chunk arrives
   useEffect(() => {
@@ -119,13 +132,51 @@ export default function App() {
         ) : (
           <button onClick={() => setIsRecording(true)}>Record</button>
         )}
-      </div>
 
-      <div className="transcript" ref={transcriptRef}>
-        {segments.map((c) => (
-          <span key={c.id}>{c.text}</span>
-        ))}
+      {!isRecording && segments.length > 0 && (
+        <button
+            onClick={async () => {
+              const allPCM = new Int16Array(recordedPCM.reduce((sum, arr) => sum + arr.length, 0));
+              let offset = 0;
+              for (const arr of recordedPCM) {
+                allPCM.set(arr, offset);
+                offset += arr.length;
+              }
+              const audioBlob = new Blob([allPCM.buffer], { type: "audio/pcm" });
+              const form = new FormData();
+              form.append("audio", audioBlob, "audio.pcm");
+              form.append("transcript", editableTranscript);
+
+              const res = await fetch("http://localhost:8000/train", {
+                method: "POST",
+                body: form,
+              });
+              if (res.ok) {
+                alert("Trained successfully!");
+              } else {
+                alert("Train failed.");
+              }
+            }}
+            style={{ marginTop: 12 }}
+        >
+          Train
+        </button>
+      )}
       </div>
+      <textarea
+          className="transcript"
+          ref={transcriptRef}
+          value={editableTranscript}
+          readOnly={isRecording}
+          onChange={(e) => setEditableTranscript(e.target.value)}
+          rows={24}
+          style={{ width: "100%", fontSize: "1.2em" }}
+      />
     </div>
   );
 }
+
+
+
+
+
